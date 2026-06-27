@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Agent Bridge",
+    "slug": "agent-mobile-bridge",
+    "description": "Claude Code 원격 승인·결재와 라이브 피드 모바일 트윈.",
+    "version": "0.1.0",
+    "scheme": "agentbridge",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#f4f1ea",
+    "plugins": ["expo-notifications"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.agentmobilebridge.app",
+      "buildNumber": "1"
+    },
+    "android": {
+      "package": "com.agentmobilebridge.app",
+      "versionCode": 1
+    }
+  }
+}

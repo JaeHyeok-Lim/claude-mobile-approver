@@ -1,0 +1,45 @@
+# ngrok config for the bridge tunnel. Copy to deploy/ngrok.yml (gitignored) and edit.
+#
+# WHY a config file (not a bare `ngrok http 4318`): we pin edge authentication on the
+# endpoint so the tunnel is NOT an open public door. The bridge already bearer-auths
+# every route; this adds a second, edge-level gate so the world can't even reach the
+# bridge to brute-force the token / hammer the long-poll.
+#
+# Set up your authtoken once (kept in ngrok's own config, NOT here):
+#   ngrok config add-authtoken <YOUR_NGROK_AUTHTOKEN>
+#
+# Then:  node scripts/tunnel.mjs --provider ngrok   (or set TUNNEL_PROVIDER=ngrok)
+
+version: "3"
+
+endpoints:
+  - name: bridge
+    url: # optional: a reserved domain like https://your-bridge.ngrok.app (leave blank for random)
+    upstream:
+      # Must match the bridge PORT (bridge/.env PORT, default 4318).
+      url: 4318
+
+    # ---- Edge authentication (pick ONE; this is what keeps it from being public) ----
+
+    # Option A — OAuth (recommended): only your Google/GitHub identity can load the URL.
+    traffic_policy:
+      inline:
+        on_http_request:
+          - actions:
+              - type: oauth
+                config:
+                  provider: google
+                  # Lock to specific accounts so only you get through the edge:
+                  allow_emails:
+                    - you@example.com
+
+    # Option B — HTTP Basic Auth (simpler; works for non-browser clients like the app).
+    # Comment out the traffic_policy block above and uncomment this instead:
+    # basic_auth:
+    #   - "bridgeuser:replace-with-a-strong-password"
+
+    # Option C — IP allow-list (e.g. your phone carrier / home egress CIDR). Combine with
+    # the above for defense in depth. (Requires a paid plan for some features.)
+    # ip_restrictions:
+    #   allow_cidrs:
+    #     - 203.0.113.0/24

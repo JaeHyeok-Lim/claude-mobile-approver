@@ -1,0 +1,30 @@
+# cloudflared NAMED-tunnel config. Copy to deploy/cloudflared/config.yml (gitignored)
+# and fill in the tunnel id + credentials path printed by `cloudflared tunnel create`.
+#
+# This routes a STABLE hostname to the loopback bridge. Pair it with a Cloudflare Access
+# (Zero Trust) policy on that hostname so the edge is authenticated — only your identity
+# can reach the tunnel at all. The bridge token is then a second gate behind Access.
+#
+# One-time setup (see deploy/README.md for the full walkthrough):
+#   cloudflared tunnel login
+#   cloudflared tunnel create agent-mobile-bridge        # prints <TUNNEL_ID> + creds json
+#   cloudflared tunnel route dns agent-mobile-bridge bridge.example.com
+#   # then in Cloudflare Zero Trust: Access > Applications > add bridge.example.com,
+#   # policy = allow only your email. THIS is what makes it non-public.
+
+# The tunnel UUID from `cloudflared tunnel create`.
+tunnel: REPLACE_WITH_TUNNEL_ID
+
+# Path to the credentials json `tunnel create` wrote (typically under ~/.cloudflared/).
+# On Windows this is usually C:\Users\<you>\.cloudflared\<TUNNEL_ID>.json
+credentials-file: REPLACE_WITH_ABSOLUTE_PATH_TO_CREDENTIALS.json
+
+# Don't auto-update the binary out from under a running tunnel.
+no-autoupdate: true
+
+ingress:
+  # Public hostname -> loopback bridge. Hostname must match the DNS route + Access app.
+  - hostname: bridge.example.com
+    service: http://127.0.0.1:4318
+  # Required catch-all: everything else gets refused (no implicit exposure).
+  - service: http_status:404

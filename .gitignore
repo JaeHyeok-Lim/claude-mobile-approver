@@ -1,0 +1,34 @@
+# deps
+node_modules/
+**/node_modules/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# expo
+.expo/
+*.orig.*
+web-build/
+
+# logs / os
+*.log
+.DS_Store
+
+# claude local overrides
+.claude/settings.local.json
+
+# internal working artifacts (kept local, not published)
+.claude/state/
+docs/HANDOFF.md
+docs/backlog.md
+docs/staffing.md

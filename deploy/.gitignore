@@ -1,0 +1,7 @@
+# Real tunnel configs carry credentials / private paths — never commit them.
+# Only the *.example.* templates are tracked.
+ngrok.yml
+cloudflared/config.yml
+cloudflared/*.json
+# .env is already covered by the root .gitignore, listed here for clarity.
+.env
