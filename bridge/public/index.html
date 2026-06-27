@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<title>Claude 승인</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --card2: #21252e;
+    --text: #e8eaed;
+    --muted: #9aa0aa;
+    --border: #2c313b;
+    --accent: #4f8cff;
+    --ok: #2fb86b;
+    --ok-dark: #228a4f;
+    --deny: #e0533d;
+    --deny-dark: #b53e2c;
+    --warn: #e0a73d;
+    --error: #e0533d;
+    --info: #4f8cff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
+  }
+  body { padding: 0 0 env(safe-area-inset-bottom); }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 16px calc(14px + env(safe-area-inset-top));
+    padding-top: max(14px, env(safe-area-inset-top));
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .title { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 8px; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .status-dot.online { background: var(--ok); }
+  .status-dot.offline { background: var(--error); }
+  .logout {
+    color: var(--muted);
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 16px; }
+  .banner {
+    background: var(--deny-dark);
+    color: #fff;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 14px;
+    text-align: center;
+  }
+  h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 22px 0 10px;
+  }
+  .empty { color: var(--muted); font-size: 14px; padding: 8px 2px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card .tool { font-size: 18px; font-weight: 700; word-break: break-word; }
+  .card .summary { margin: 8px 0; word-break: break-word; }
+  .meta { color: var(--muted); font-size: 13px; display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+  .meta code { background: var(--card2); padding: 1px 5px; border-radius: 5px; word-break: break-all; }
+  .actions { display: flex; gap: 12px; margin-top: 16px; }
+  .btn {
+    flex: 1;
+    border: none;
+    border-radius: 12px;
+    padding: 16px 12px;
+    font-size: 17px;
+    font-weight: 700;
+    color: #fff;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: 0.5; }
+  .btn.allow { background: var(--ok); }
+  .btn.deny { background: var(--deny); }
+
+  .event {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 10px 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+  }
+  .event .sev { width: 8px; align-self: stretch; border-radius: 4px; flex: none; }
+  .sev.info { background: var(--info); }
+  .sev.warn { background: var(--warn); }
+  .sev.error { background: var(--error); }
+  .event .body { min-width: 0; flex: 1; }
+  .event .kind { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .event .msg { word-break: break-word; font-size: 14px; }
+  .event .time { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  /* token gate */
+  .gate {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 100;
+  }
+  .gate .box { width: 100%; max-width: 360px; }
+  .gate h1 { font-size: 20px; margin: 0 0 6px; }
+  .gate p { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+  .gate input {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    margin-bottom: 12px;
+  }
+  .gate .btn.allow { width: 100%; }
+  .gate .err { color: var(--deny); font-size: 14px; margin: 0 0 12px; min-height: 18px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="gate" id="gate">
+    <div class="box">
+      <h1>브리지 토큰 입력</h1>
+      <p>승인을 받으려면 브리지 토큰을 입력하세요. 이 기기에만 저장됩니다.</p>
+      <p class="err" id="gateErr"></p>
+      <input id="tokenInput" type="password" inputmode="text" autocomplete="off"
+             autocapitalize="off" autocorrect="off" placeholder="토큰" />
+      <button class="btn allow" id="tokenSave">저장</button>
+    </div>
+  </div>
+
+  <header hidden id="header">
+    <div class="title">
+      <span class="status-dot" id="statusDot"></span>
+      <span>Claude 승인</span>
+    </div>
+    <button class="logout" id="logout">로그아웃</button>
+  </header>
+
+  <main hidden id="app">
+    <div class="banner" id="banner" hidden>연결 끊김 — 재시도 중…</div>
+
+    <h2>승인 요청</h2>
+    <div id="approvals"></div>
+    <div class="empty" id="approvalsEmpty" hidden>대기 중인 요청이 없습니다.</div>
+
+    <h2>최근 활동</h2>
+    <div id="events"></div>
+    <div class="empty" id="eventsEmpty" hidden>활동 기록이 없습니다.</div>
+  </main>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "bridge_token";
+  var POLL_MS = 3000;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var gate = $("gate"), gateErr = $("gateErr"), tokenInput = $("tokenInput"), tokenSave = $("tokenSave");
+  var header = $("header"), appEl = $("app"), logout = $("logout");
+  var statusDot = $("statusDot"), banner = $("banner");
+  var approvalsEl = $("approvals"), approvalsEmpty = $("approvalsEmpty");
+  var eventsEl = $("events"), eventsEmpty = $("eventsEmpty");
+
+  var token = null;
+  var pollTimer = null;
+  var pending = {}; // requestId -> true while a resolve is in flight (optimistic hide)
+
+  function getToken() { try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; } }
+  function setToken(t) { try { localStorage.setItem(TOKEN_KEY, t); } catch (e) {} }
+  function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+
+  function showGate(msg) {
+    token = null;
+    gateErr.textContent = msg || "";
+    tokenInput.value = "";
+    gate.hidden = false;
+    header.hidden = true;
+    appEl.hidden = true;
+    stopPolling();
+  }
+
+  function showApp() {
+    gate.hidden = true;
+    header.hidden = false;
+    appEl.hidden = false;
+  }
+
+  // Thrown for a 401 so callers can trigger re-auth.
+  function Unauthorized() {}
+
+  function api(path, opts) {
+    opts = opts || {};
+    var headers = opts.headers || {};
+    headers["Authorization"] = "Bearer " + token;
+    if (opts.body) headers["Content-Type"] = "application/json";
+    return fetch(path, {
+      method: opts.method || "GET",
+      headers: headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      cache: "no-store"
+    }).then(function (res) {
+      if (res.status === 401) { throw new Unauthorized(); }
+      if (!res.ok) { throw new Error("http " + res.status); }
+      return res.json();
+    });
+  }
+
+  function setOnline(ok) {
+    statusDot.className = "status-dot " + (ok ? "online" : "offline");
+    banner.hidden = ok;
+  }
+
+  function relTime(iso) {
+    var t = Date.parse(iso);
+    if (isNaN(t)) return "";
+    var s = Math.round((Date.now() - t) / 1000);
+    if (s < 0) s = 0;
+    if (s < 60) return s + "초 전";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "분 전";
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + "시간 전";
+    return Math.floor(h / 24) + "일 전";
+  }
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  function renderApprovals(list) {
+    // Only PENDING and not currently being resolved optimistically.
+    var items = (list || []).filter(function (a) {
+      return a && a.status === "pending" && !pending[a.requestId];
+    });
+    approvalsEl.innerHTML = "";
+    approvalsEmpty.hidden = items.length > 0;
+    items.forEach(function (a) {
+      var card = el("div", "card");
+      card.appendChild(el("div", "tool", a.tool));
+      card.appendChild(el("div", "summary", a.summary || ""));
+
+      var meta = el("div", "meta");
+      if (a.cwd) {
+        var cwd = el("div", null);
+        cwd.appendChild(document.createTextNode("cwd: "));
+        cwd.appendChild(el("code", null, a.cwd));
+        meta.appendChild(cwd);
+      }
+      var sess = el("div", null);
+      sess.appendChild(document.createTextNode("session: "));
+      sess.appendChild(el("code", null, a.sessionId || ""));
+      meta.appendChild(sess);
+      meta.appendChild(el("div", null, relTime(a.createdAt)));
+      card.appendChild(meta);
+
+      var actions = el("div", "actions");
+      var allow = el("button", "btn allow", "승인");
+      var deny = el("button", "btn deny", "거부");
+      allow.onclick = function () { resolve(a.requestId, "allow", actions); };
+      deny.onclick = function () { resolve(a.requestId, "deny", actions); };
+      actions.appendChild(deny);
+      actions.appendChild(allow);
+      card.appendChild(actions);
+
+      approvalsEl.appendChild(card);
+    });
+  }
+
+  function resolve(id, decision, actions) {
+    var buttons = actions.querySelectorAll("button");
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+    pending[id] = true;
+    // Optimistic: drop the card immediately.
+    refreshApprovalsView();
+    api("/v1/approvals/" + encodeURIComponent(id) + "/resolve", {
+      method: "POST",
+      body: { decision: decision }
+    }).then(function () {
+      delete pending[id];
+      tick(); // refetch both lists
+    }).catch(function (err) {
+      delete pending[id];
+      if (err instanceof Unauthorized) { showGate("토큰이 거부되었습니다. 다시 입력하세요."); return; }
+      setOnline(false);
+      // re-show the card so the user can retry
+      lastApprovals && renderApprovals(lastApprovals);
+    });
+  }
+
+  var lastApprovals = null;
+  function refreshApprovalsView() { renderApprovals(lastApprovals); }
+
+  function renderEvents(list) {
+    eventsEl.innerHTML = "";
+    var items = list || [];
+    eventsEmpty.hidden = items.length > 0;
+    // Newest first if not already; store order is preserved otherwise.
+    items.slice().reverse().forEach(function (ev) {
+      if (!ev) return;
+      var row = el("div", "event");
+      row.appendChild(el("div", "sev " + (ev.severity || "info")));
+      var body = el("div", "body");
+      body.appendChild(el("div", "kind", ev.kind || ""));
+      body.appendChild(el("div", "msg", ev.message || ""));
+      body.appendChild(el("div", "time", relTime(ev.createdAt)));
+      row.appendChild(body);
+      eventsEl.appendChild(row);
+    });
+  }
+
+  function tick() {
+    if (!token) return;
+    Promise.all([
+      api("/v1/approvals").then(function (d) { return d.approvals; }),
+      api("/v1/events").then(function (d) { return d.events; })
+    ]).then(function (res) {
+      setOnline(true);
+      lastApprovals = res[0] || [];
+      renderApprovals(lastApprovals);
+      renderEvents(res[1] || []);
+    }).catch(function (err) {
+      if (err instanceof Unauthorized) { showGate("토큰이 거부되었습니다. 다시 입력하세요."); return; }
+      setOnline(false); // network error: keep retrying on the interval
+    });
+  }
+
+  function startPolling() {
+    stopPolling();
+    tick();
+    pollTimer = setInterval(tick, POLL_MS);
+  }
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function start(t) {
+    token = t;
+    showApp();
+    setOnline(false);
+    startPolling();
+  }
+
+  tokenSave.onclick = function () {
+    var t = (tokenInput.value || "").trim();
+    if (!t) { gateErr.textContent = "토큰을 입력하세요."; return; }
+    setToken(t);
+    start(t);
+  };
+  tokenInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") tokenSave.onclick();
+  });
+
+  logout.onclick = function () {
+    clearToken();
+    showGate("");
+  };
+
+  // Refetch promptly when the tab is foregrounded again.
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && token) tick();
+  });
+
+  var existing = getToken();
+  if (existing) { start(existing); } else { showGate(""); }
+})();
+</script>
+</body>
+</html>

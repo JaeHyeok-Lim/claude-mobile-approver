@@ -8,7 +8,8 @@
 //   - Only redacted summaries are ever stored/logged/pushed (see redact.ts).
 
 import express from "express";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
 import { config } from "./config.js";
 import { makeRequireAuth } from "./auth.js";
 import { RateLimiter } from "./rateLimit.js";
@@ -55,6 +56,16 @@ export function createApp() {
     makeRequireAuth(limiter),
     buildRouter({ approvals, events, devices, push, live })
   );
+
+  // Mobile web approval page (PUBLIC — outside /v1, NOT behind requireAuth). The HTML/JS carry no
+  // secrets; the user enters the bridge token at runtime and it's only ever sent on /v1 calls,
+  // which stay fully auth-gated above. Resolve public/ relative to this module (ESM, no __dirname):
+  // src/server.ts -> ../public. Mounted AFTER /v1 and BEFORE the catch-all 404.
+  const publicDir = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
+  app.use(express.static(publicDir));
+  app.get("/", (_req, res) => {
+    res.sendFile(join(publicDir, "index.html"));
+  });
 
   // Reject anything unmatched (also auth-agnostic 404, no info leak).
   app.use((_req, res) => {
