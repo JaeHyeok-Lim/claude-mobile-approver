@@ -77,6 +77,43 @@
   }
   .empty { color: var(--muted); font-size: 14px; padding: 8px 2px; }
 
+  .session { margin-bottom: 16px; }
+  .session-head {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    color: var(--text);
+    cursor: pointer;
+    text-align: left;
+    touch-action: manipulation;
+  }
+  .session-head .chev { flex: none; color: var(--muted); transition: transform 0.15s; font-size: 13px; }
+  .session.collapsed .chev { transform: rotate(-90deg); }
+  .session-head .info { min-width: 0; flex: 1; }
+  .session-head .label { font-weight: 700; font-size: 16px; word-break: break-all; }
+  .session-head .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .session-head .count {
+    flex: none;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    min-width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    padding: 0 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .session-body { padding-top: 12px; }
+  .session.collapsed .session-body { display: none; }
+
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -105,6 +142,16 @@
   .btn.allow { background: var(--ok); }
   .btn.deny { background: var(--deny); }
 
+  .event-group { margin-bottom: 14px; }
+  .event-group .src {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0 2px 6px;
+    word-break: break-all;
+  }
   .event {
     display: flex;
     gap: 10px;
@@ -202,6 +249,8 @@
   var token = null;
   var pollTimer = null;
   var pending = {}; // requestId -> true while a resolve is in flight (optimistic hide)
+  var collapsed = {}; // sessionId -> true when its section is collapsed (survives re-render)
+  var sessionLabels = {}; // sessionId -> folder-basename label, learned from approvals
 
   function getToken() { try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; } }
   function setToken(t) { try { localStorage.setItem(TOKEN_KEY, t); } catch (e) {} }
@@ -268,42 +317,104 @@
     return e;
   }
 
+  function shortId(id) { return id ? String(id).slice(0, 8) : "?"; }
+
+  // Folder basename of a cwd, e.g. "C:/Users/.../foo" or "/a/b/foo" -> "foo".
+  function basename(cwd) {
+    if (!cwd) return "";
+    var parts = String(cwd).replace(/[\\/]+$/, "").split(/[\\/]+/);
+    return parts[parts.length - 1] || "";
+  }
+
+  function approvalCard(a) {
+    var card = el("div", "card");
+    card.appendChild(el("div", "tool", a.tool));
+    card.appendChild(el("div", "summary", a.summary || ""));
+
+    var meta = el("div", "meta");
+    if (a.cwd) {
+      var cwd = el("div", null);
+      cwd.appendChild(document.createTextNode("cwd: "));
+      cwd.appendChild(el("code", null, a.cwd));
+      meta.appendChild(cwd);
+    }
+    meta.appendChild(el("div", null, relTime(a.createdAt)));
+    card.appendChild(meta);
+
+    var actions = el("div", "actions");
+    var allow = el("button", "btn allow", "승인");
+    var deny = el("button", "btn deny", "거부");
+    allow.onclick = function () { resolve(a.requestId, "allow", actions); };
+    deny.onclick = function () { resolve(a.requestId, "deny", actions); };
+    actions.appendChild(deny);
+    actions.appendChild(allow);
+    card.appendChild(actions);
+    return card;
+  }
+
   function renderApprovals(list) {
     // Only PENDING and not currently being resolved optimistically.
     var items = (list || []).filter(function (a) {
       return a && a.status === "pending" && !pending[a.requestId];
     });
+
+    // Group by sessionId; learn each session's folder label for the event feed.
+    var groups = {}; // sessionId -> { id, label, items[], latest }
+    items.forEach(function (a) {
+      var sid = a.sessionId || "";
+      var g = groups[sid];
+      if (!g) { g = groups[sid] = { id: sid, label: basename(a.cwd), items: [], latest: 0 }; }
+      if (!g.label) g.label = basename(a.cwd);
+      g.items.push(a);
+      var t = Date.parse(a.createdAt);
+      if (!isNaN(t) && t > g.latest) g.latest = t;
+    });
+
+    var list2 = Object.keys(groups).map(function (k) { return groups[k]; });
+    // Disambiguate sessions that share a folder label.
+    var labelCount = {};
+    list2.forEach(function (g) {
+      var key = g.label || "?";
+      labelCount[key] = (labelCount[key] || 0) + 1;
+    });
+    list2.forEach(function (g) {
+      // Remember label (with id when ambiguous) for the event feed.
+      sessionLabels[g.id] = g.label || shortId(g.id);
+      g.displayLabel = g.label || shortId(g.id);
+      g.sub = (labelCount[g.label || "?"] > 1 || !g.label) ? shortId(g.id) : "";
+    });
+
+    // Newest activity first; within a session, newest approval first.
+    list2.sort(function (a, b) { return b.latest - a.latest; });
+
     approvalsEl.innerHTML = "";
     approvalsEmpty.hidden = items.length > 0;
-    items.forEach(function (a) {
-      var card = el("div", "card");
-      card.appendChild(el("div", "tool", a.tool));
-      card.appendChild(el("div", "summary", a.summary || ""));
 
-      var meta = el("div", "meta");
-      if (a.cwd) {
-        var cwd = el("div", null);
-        cwd.appendChild(document.createTextNode("cwd: "));
-        cwd.appendChild(el("code", null, a.cwd));
-        meta.appendChild(cwd);
-      }
-      var sess = el("div", null);
-      sess.appendChild(document.createTextNode("session: "));
-      sess.appendChild(el("code", null, a.sessionId || ""));
-      meta.appendChild(sess);
-      meta.appendChild(el("div", null, relTime(a.createdAt)));
-      card.appendChild(meta);
+    list2.forEach(function (g) {
+      var section = el("div", "session" + (collapsed[g.id] ? " collapsed" : ""));
 
-      var actions = el("div", "actions");
-      var allow = el("button", "btn allow", "승인");
-      var deny = el("button", "btn deny", "거부");
-      allow.onclick = function () { resolve(a.requestId, "allow", actions); };
-      deny.onclick = function () { resolve(a.requestId, "deny", actions); };
-      actions.appendChild(deny);
-      actions.appendChild(allow);
-      card.appendChild(actions);
+      var head = el("button", "session-head");
+      head.appendChild(el("span", "chev", "▼"));
+      var info = el("div", "info");
+      info.appendChild(el("div", "label", g.displayLabel));
+      var subText = (g.sub ? g.sub + " · " : "") + relTime(new Date(g.latest).toISOString());
+      info.appendChild(el("div", "sub", subText));
+      head.appendChild(info);
+      head.appendChild(el("span", "count", String(g.items.length)));
+      head.onclick = function () {
+        collapsed[g.id] = !collapsed[g.id];
+        section.classList.toggle("collapsed", !!collapsed[g.id]);
+      };
+      section.appendChild(head);
 
-      approvalsEl.appendChild(card);
+      var body = el("div", "session-body");
+      g.items.sort(function (a, b) {
+        return (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0);
+      });
+      g.items.forEach(function (a) { body.appendChild(approvalCard(a)); });
+      section.appendChild(body);
+
+      approvalsEl.appendChild(section);
     });
   }
 
@@ -331,21 +442,40 @@
   var lastApprovals = null;
   function refreshApprovalsView() { renderApprovals(lastApprovals); }
 
+  function eventRow(ev) {
+    var row = el("div", "event");
+    row.appendChild(el("div", "sev " + (ev.severity || "info")));
+    var body = el("div", "body");
+    body.appendChild(el("div", "kind", ev.kind || ""));
+    body.appendChild(el("div", "msg", ev.message || ""));
+    body.appendChild(el("div", "time", relTime(ev.createdAt)));
+    row.appendChild(body);
+    return row;
+  }
+
   function renderEvents(list) {
     eventsEl.innerHTML = "";
-    var items = list || [];
+    // Newest first (store order is oldest-first).
+    var items = (list || []).filter(Boolean).slice().reverse();
     eventsEmpty.hidden = items.length > 0;
-    // Newest first if not already; store order is preserved otherwise.
-    items.slice().reverse().forEach(function (ev) {
-      if (!ev) return;
-      var row = el("div", "event");
-      row.appendChild(el("div", "sev " + (ev.severity || "info")));
-      var body = el("div", "body");
-      body.appendChild(el("div", "kind", ev.kind || ""));
-      body.appendChild(el("div", "msg", ev.message || ""));
-      body.appendChild(el("div", "time", relTime(ev.createdAt)));
-      row.appendChild(body);
-      eventsEl.appendChild(row);
+
+    // Group by source (== sessionId), preserving first-seen (newest) order.
+    var groups = {}; // source -> { src, items[] }
+    var order = [];
+    items.forEach(function (ev) {
+      var src = ev.source || "";
+      var g = groups[src];
+      if (!g) { g = groups[src] = { src: src, items: [] }; order.push(g); }
+      g.items.push(ev);
+    });
+
+    order.forEach(function (g) {
+      var group = el("div", "event-group");
+      // Reuse the folder label learned from approvals; else short source.
+      var label = sessionLabels[g.src] || (g.src ? shortId(g.src) : "(시스템)");
+      group.appendChild(el("div", "src", label));
+      g.items.forEach(function (ev) { group.appendChild(eventRow(ev)); });
+      eventsEl.appendChild(group);
     });
   }
 
