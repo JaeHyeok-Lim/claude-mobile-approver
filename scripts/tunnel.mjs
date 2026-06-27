@@ -152,7 +152,9 @@ function startNgrok() {
   const args = ["start", "--config", cfgFile, endpoint];
   log("tunnel", `ngrok endpoint '${endpoint}' -> ${localTarget} (config ${cfgFile})`);
   log("tunnel", "Edge auth = OAuth/Basic-Auth declared in deploy/ngrok.yml.");
-  const child = spawn("ngrok", args, { cwd: DEPLOY_DIR, env: process.env, ...SPAWN_OPTS });
+  // Spawn the resolved binary path directly (mirrors the cloudflare path) — avoids the
+  // Windows .cmd/.exe shim spawn issue and a prior undefined-options reference.
+  const child = spawn(bin, args, { cwd: DEPLOY_DIR, env: process.env });
   watchForUrl(child, "ngrok");
   return child;
 }

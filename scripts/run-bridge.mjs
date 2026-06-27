@@ -36,11 +36,14 @@ if (cfg.host !== "127.0.0.1" && cfg.host !== "localhost" && cfg.host !== "::1") 
 }
 
 // Spawn the service via its own npm script so we inherit the exact tsx invocation.
+// On Windows, `npm` is a `.cmd` shim; Node >=20.12 refuses to spawn `.cmd` without a shell
+// (EINVAL), so spawn through a shell on win32.
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const child = spawn(npm, ["start"], {
   cwd: BRIDGE_DIR,
   stdio: "inherit",
-  env: process.env
+  env: process.env,
+  shell: process.platform === "win32"
 });
 
 let shuttingDown = false;
