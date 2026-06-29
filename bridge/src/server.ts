@@ -19,6 +19,7 @@ import { EventStore } from "./store/eventStore.js";
 import { DeviceStore } from "./store/deviceStore.js";
 import { ExpoPush } from "./push/expoPush.js";
 import { LiveHub } from "./live/liveHub.js";
+import { createTelegramChannel } from "./telegram/poller.js";
 
 export function createApp() {
   const approvals = new ApprovalStore({
@@ -33,6 +34,13 @@ export function createApp() {
     maxPerIp: config.liveMaxPerIp
   });
   const limiter = new RateLimiter({ windowMs: config.rateWindowMs });
+
+  // Telegram remote-approval channel — opt-in (null unless TELEGRAM_BOT_TOKEN is set). Purely
+  // additive: it resolves through the same store and never gates. The poll loop is NOT started
+  // here so createApp() in tests spawns no network loop; only the isMain block below starts it.
+  const telegram = config.telegramEnabled
+    ? createTelegramChannel({ approvals, events, live, config })
+    : null;
 
   // Periodically drop stale terminal/expired approvals.
   const sweepTimer = setInterval(() => approvals.sweep(), 30_000);
@@ -54,7 +62,7 @@ export function createApp() {
     "/v1",
     limiter.middleware({ max: config.rateMax, sensitiveMax: config.rateSensitiveMax }),
     makeRequireAuth(limiter),
-    buildRouter({ approvals, events, devices, push, live })
+    buildRouter({ approvals, events, devices, push, live, telegram })
   );
 
   // Mobile web approval page (PUBLIC — outside /v1, NOT behind requireAuth). The HTML/JS carry no
@@ -89,14 +97,17 @@ export function createApp() {
     }
   );
 
-  return { app, stores: { approvals, events, devices } };
+  // `telegram` is returned for test shutdown; its poll loop is started only in isMain below.
+  return { app, stores: { approvals, events, devices }, telegram };
 }
 
 // Start the server unless imported (e.g. by tests).
 const entry = process.argv[1] ?? "";
 const isMain = import.meta.url === pathToFileURL(entry).href;
 if (isMain) {
-  const { app } = createApp();
+  const { app, telegram } = createApp();
+  // Only the real process starts the network poll loop (tests never spawn it).
+  telegram?.start();
   app.listen(config.port, config.host, () => {
     console.log(`[bridge] listening on http://${config.host}:${config.port} (v1)`);
   });

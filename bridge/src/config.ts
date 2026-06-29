@@ -54,6 +54,15 @@ export const config = {
   approvalRetainMs: int(process.env.APPROVAL_RETAIN_MS, 600_000),
   eventBufferMax: int(process.env.EVENT_BUFFER_MAX, 200),
   expoPushUrl: (process.env.EXPO_PUSH_URL || "https://exp.host/--/api/v2/push/send").trim(),
+  // ---- Telegram remote-approval channel (OPT-IN, purely additive) ----
+  // No bot token -> channel disabled and the bridge behaves exactly as v1. Telegram never gates:
+  // if send/poll fails the approval just stays pending -> TTL -> deny.
+  telegramBotToken: (process.env.TELEGRAM_BOT_TOKEN || "").trim(),
+  telegramChatId: (process.env.TELEGRAM_CHAT_ID || "").trim(),
+  telegramEnabled: !!(process.env.TELEGRAM_BOT_TOKEN || "").trim(),
+  // TEST SEAM: point this at a fake server in tests; defaults to the real Bot API.
+  telegramApiBase: (process.env.TELEGRAM_API_BASE || "https://api.telegram.org").trim(),
+  telegramPollTimeoutSec: int(process.env.TELEGRAM_POLL_TIMEOUT_SEC, 30),
   // ---- Resource caps / rate limits (DoS + brute-force hardening) ----
   // Per-IP request budget over a sliding window applied to ALL /v1 routes.
   rateWindowMs: int(process.env.RATE_WINDOW_MS, 60_000),

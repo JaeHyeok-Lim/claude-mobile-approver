@@ -13,6 +13,7 @@
 
 import { Router, type Request, type Response } from "express";
 import type {
+  ApprovalView,
   CreateApprovalRequest,
   CreateApprovalResponse,
   CreateEventRequest,
@@ -27,8 +28,27 @@ import type { EventStore } from "./store/eventStore.js";
 import type { DeviceStore } from "./store/deviceStore.js";
 import type { ExpoPush } from "./push/expoPush.js";
 import type { LiveHub } from "./live/liveHub.js";
+import type { TelegramChannel } from "./telegram/poller.js";
 import { config } from "./config.js";
 import { buildSummary, clampLine } from "./redact.js";
+
+// Shared side-effects run after a SUCCESSFUL resolve, regardless of which channel resolved it
+// (the HTTP /resolve route or the Telegram button). Kept here so the two callers can't drift:
+// record the redacted Decision in the feed + broadcast both frames over SSE.
+export function notifyResolved(
+  deps: { events: EventStore; live: LiveHub },
+  view: ApprovalView,
+  decision: Decision
+): void {
+  const ev = deps.events.append({
+    kind: "Decision",
+    message: `${view.tool} ${decision === "allow" ? "승인됨" : "거부됨"}: ${view.summary}`,
+    severity: decision === "allow" ? "info" : "warn",
+    source: view.sessionId
+  });
+  deps.live.broadcast({ type: "event", event: ev });
+  deps.live.broadcast({ type: "approval", approval: view });
+}
 
 const EVENT_KINDS = new Set<EventKind>([
   "SubagentStop",
@@ -45,6 +65,8 @@ export interface Deps {
   devices: DeviceStore;
   push: ExpoPush;
   live: LiveHub;
+  // Optional Telegram channel (null when TELEGRAM_BOT_TOKEN is unset — pure v1).
+  telegram: TelegramChannel | null;
 }
 
 function badRequest(res: Response, message: string): void {
@@ -53,7 +75,7 @@ function badRequest(res: Response, message: string): void {
 
 export function buildRouter(deps: Deps): Router {
   const router = Router();
-  const { approvals, events, devices, push, live } = deps;
+  const { approvals, events, devices, push, live, telegram } = deps;
 
   // Liveness. Auth-gated per the spec (no exempt endpoint).
   router.get("/healthz", (_req, res) => {
@@ -87,6 +109,8 @@ export function buildRouter(deps: Deps): Router {
       data: { kind: "approval", requestId: view.requestId }
     });
     live.broadcast({ type: "approval", approval: view });
+    // Telegram nudge (best-effort; never blocks or affects the gate — same posture as push).
+    telegram?.notifyApproval(view);
     // Mirror into the feed so the live tab shows the request too.
     const ev = events.append({
       kind: "ApprovalRequest",
@@ -137,15 +161,8 @@ export function buildRouter(deps: Deps): Router {
       return;
     }
     const view = result.view;
-    // Feed + live: record the decision (redacted).
-    const ev = events.append({
-      kind: "Decision",
-      message: `${view.tool} ${decision === "allow" ? "승인됨" : "거부됨"}: ${view.summary}`,
-      severity: decision === "allow" ? "info" : "warn",
-      source: view.sessionId
-    });
-    live.broadcast({ type: "event", event: ev });
-    live.broadcast({ type: "approval", approval: view });
+    // Shared side-effects (feed Decision + live broadcasts) — same path the Telegram button takes.
+    notifyResolved({ events, live }, view, decision as Decision);
     res.json(view);
   });
 
