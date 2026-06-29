@@ -193,6 +193,105 @@ test("not_found request -> '알 수 없는 요청'", async () => {
   assert.ok(calls.answers.some((a) => a.text === "알 수 없는 요청"));
 });
 
+// ---- Card rendering: the safe partial must never carry a raw value ----
+
+// Build the channel with the same wiring as setup(), but resolve a notifyApproval send so we can
+// read the exact card text that would be pushed to Telegram.
+async function renderSentCard(view: import("../contracts/index.js").ApprovalView): Promise<string> {
+  const approvals = new ApprovalStore({ ttlMs: 600_000, retainMs: 600_000 });
+  const events = new EventStore({ max: 50 });
+  const live = new LiveHub({ maxClients: 10, maxPerIp: 10 });
+  const { api, calls } = fakeApi();
+  const channel = createTelegramChannel({
+    approvals,
+    events,
+    live,
+    api,
+    config: {
+      telegramBotToken: "t",
+      telegramChatId: CHAT,
+      telegramApiBase: "http://fake.invalid",
+      telegramPollTimeoutSec: 1
+    }
+  });
+  channel.notifyApproval(view);
+  await Promise.resolve();
+  return calls.sends.at(-1)?.text ?? "";
+}
+
+test("Bash card shows the Korean abstract + safe partial, NEVER the secret-bearing args", async () => {
+  // A bash approval whose safeInput was produced by the hook's redact(): prog+sub+argc only.
+  // The original command was e.g. `npm publish --token sk-SECRET --registry https://r.internal`.
+  const view = {
+    requestId: "11111111-1111-1111-1111-111111111111",
+    tool: "Bash",
+    status: "pending" as const,
+    summary: "Bash · 1 field (command)",
+    safeInput: { kind: "bash" as const, prog: "npm", sub: "publish", argc: 6 },
+    cwd: "C:\\Users\\alice\\projects\\agent-mobile-bridge\\bridge",
+    sessionId: "abcdef1234567890",
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 600_000).toISOString()
+  };
+  const card = await renderSentCard(view);
+  // Korean abstract + safe partial present.
+  assert.ok(card.includes("셸 명령 실행"), "tool label");
+  assert.ok(card.includes("셸 명령 'npm publish' 실행 (총 6개 토큰)"), "abstract");
+  assert.ok(card.includes("명령: npm publish …"), "safe partial");
+  assert.ok(card.includes("⚠️"), "risk mark for Bash");
+  // SECURITY: the secret token / flags / registry must appear NOWHERE in the card.
+  assert.ok(!card.includes("sk-SECRET"), "secret leaked into card");
+  assert.ok(!card.includes("--token"));
+  assert.ok(!card.includes("r.internal"));
+  // cwd is masked (middle collapsed).
+  assert.ok(card.includes("C:\\…\\agent-mobile-bridge\\bridge"), "masked cwd");
+  assert.ok(!card.includes("alice"), "full cwd middle leaked");
+});
+
+test("Edit card masks a deep path and shows only the basename", async () => {
+  const view = {
+    requestId: "22222222-2222-2222-2222-222222222222",
+    tool: "Edit",
+    status: "pending" as const,
+    summary: "Edit · 3 fields",
+    safeInput: {
+      kind: "file" as const,
+      basename: "config.ts",
+      pathMasked: "C:\\…\\src\\config.ts"
+    },
+    cwd: "C:\\Users\\alice\\projects\\secret-app",
+    sessionId: "sess-deadbeef",
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 600_000).toISOString()
+  };
+  const card = await renderSentCard(view);
+  assert.ok(card.includes("파일 수정"), "tool label");
+  assert.ok(card.includes("파일 수정: config.ts"), "abstract with basename");
+  assert.ok(card.includes("파일: config.ts"), "safe partial");
+  assert.ok(card.includes("C:\\…\\src\\config.ts"), "masked file path on 경로 line");
+  assert.ok(card.includes("⚠️"), "risk mark for Edit");
+  // The deep middle of the real path must not surface (we only ever sent the masked form).
+  assert.ok(!card.includes("Users\\alice\\projects"), "deep path leaked");
+});
+
+test("legacy/missing safeInput still renders (backward-tolerant) without a partial line", async () => {
+  const view = {
+    requestId: "33333333-3333-3333-3333-333333333333",
+    tool: "Read",
+    status: "pending" as const,
+    summary: "Read · 1 field",
+    // no safeInput (old hook) — card must still render.
+    cwd: "/srv/app",
+    sessionId: "x",
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 600_000).toISOString()
+  };
+  const card = await renderSentCard(view);
+  assert.ok(card.includes("파일 읽기"), "falls back to tool label");
+  assert.ok(card.includes("[대기] 승인 요청"));
+  assert.ok(card.includes("/srv/app"), "short cwd shown as-is");
+});
+
 test("/start bootstrap logs/sends the chat_id and resolves nothing", async () => {
   const { channel, calls } = setup();
   const update: TelegramUpdate = {

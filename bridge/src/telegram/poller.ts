@@ -21,6 +21,7 @@ import type { EventStore } from "../store/eventStore.js";
 import type { ApprovalStore } from "../store/approvalStore.js";
 import type { LiveHub } from "../live/liveHub.js";
 import { notifyResolved } from "../routes.js";
+import { abstractKo, koreanToolLabel, maskPath, safePartial } from "../redact.js";
 import { createTelegramApi, escapeHtml, type TelegramApi, type TelegramUpdate } from "./api.js";
 
 export interface TelegramChannel {
@@ -62,76 +63,57 @@ const RECONCILE_MS = 15_000;
 const RISKY_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 // The display context we keep per tracked request so an edited card (decision/expiry/web-resolve)
-// can re-render lines 1–3 verbatim and only swap the leading status tag + line 4.
+// can re-render the body verbatim and only swap the leading status tag + the bottom line.
+// Every field here is already REDACTED / safe to show — see redact.ts (abstractKo/safePartial are
+// built only from the value-free SafeInput; maskedPath collapses the path's middle).
 interface CardContext {
   messageId: number;
   projectName: string;
   shortSession: string;
-  riskPrefix: string;
-  actionText: string;
-  summary: string;
-  cwd: string;
+  riskMark: string; // "  ⚠️" for mutating tools, else ""
+  toolLabel: string; // koreanToolLabel(tool)
+  abstract: string; // line 1 of 내용 (Korean abstract)
+  partial: string; // line 2 of 내용 (safe partial; may be "")
+  maskedPath: string; // 경로 line (masked)
   // Set once we've edited the card into a terminal state, so reconcile never re-edits it.
   edited?: boolean;
 }
 
 // Last path segment of a cwd, tolerating both \ and / separators. Empty/missing -> a TEXT fallback.
-function basename(cwd: string): string {
+function projectNameOf(cwd: string): string {
   const parts = cwd.split(/[\\/]+/).filter((p) => p.length > 0);
   return parts.at(-1) ?? "(작업폴더 없음)";
 }
 
-// ⚠️ ONLY for mutating tools (the important-warning exception); plain "" otherwise.
-function riskPrefixFor(tool: string): string {
-  return RISKY_TOOLS.has(tool) ? "⚠️ " : "";
-}
-
-// TEXT-only action label (no tool emoji). Never throws on an unknown tool.
-function actionTextFor(tool: string): string {
-  switch (tool) {
-    case "Bash":
-      return "Bash 명령 실행";
-    case "Edit":
-    case "MultiEdit":
-      return "파일 수정(Edit)";
-    case "Write":
-      return "파일 생성·덮어쓰기(Write)";
-    case "Read":
-      return "파일 읽기(Read)";
-    case "WebFetch":
-    case "WebSearch":
-      return `웹 요청(${tool})`;
-    case "Glob":
-    case "Grep":
-      return `파일 검색(${tool})`;
-    default:
-      return `${tool} 실행 요청`;
-  }
-}
-
-// Clamp the cwd to its last 64 chars (prefix … when truncated), then escape for HTML.
-function clampCwd(cwd: string): string {
-  const trimmed = cwd.length > 64 ? `…${cwd.slice(-64)}` : cwd;
-  return escapeHtml(trimmed);
+// "  ⚠️" ONLY for mutating tools (the one sanctioned emoji); plain "" otherwise.
+function riskMarkFor(tool: string): string {
+  return RISKY_TOOLS.has(tool) ? "  ⚠️" : "";
 }
 
 // Static expiry line computed at send time (no live countdown). TEXT only, no emoji.
 function expiryLine(expiresAt: string): string {
   const ms = new Date(expiresAt).getTime() - Date.now();
   const sec = Math.max(0, Math.round(ms / 1000));
-  if (sec >= 60) return `<b>${Math.round(sec / 60)}분</b> 내 미응답 시 자동 거부`;
-  return `<b>${sec}초</b> 내 미응답 시 자동 거부`;
+  if (sec >= 60) return `만료 : <b>${Math.round(sec / 60)}분</b> 내 미응답 시 자동 거부`;
+  return `만료 : <b>${sec}초</b> 내 미응답 시 자동 거부`;
 }
 
-// Render the 4-line card body. `statusTag` is the bracketed status word at line start; `line4` is
-// the bottom status/expiry line. Lines 1–3 are identical across pending and every edited state.
-function renderCard(ctx: CardContext, statusTag: string, line4: string): string {
-  const line1 = `[${statusTag}] <b>${escapeHtml(ctx.projectName)}</b>  <code>#${escapeHtml(
-    ctx.shortSession
-  )}</code>`;
-  const line2 = `${ctx.riskPrefix}${escapeHtml(ctx.actionText)} · ${escapeHtml(ctx.summary)}`;
-  const line3 = `<i>${clampCwd(ctx.cwd)}</i>`;
-  return `${line1}\n${line2}\n${line3}\n${line4}`;
+// Render the list-style card body. `statusTag` is the bracketed status word at line start; `lastLine`
+// is the bottom expiry/status line. Lines 1–3 (the header + 프로젝트/세션/도구 + 내용/경로) are
+// identical across pending and every edited state — only the tag and the last line swap.
+function renderCard(ctx: CardContext, statusTag: string, lastLine: string): string {
+  const lines = [
+    `[${statusTag}] 승인 요청`,
+    "",
+    `• 프로젝트 : <b>${escapeHtml(ctx.projectName)}</b>`,
+    `• 세션     : <code>#${escapeHtml(ctx.shortSession)}</code>`,
+    `• 도구     : ${escapeHtml(ctx.toolLabel)}${ctx.riskMark}`,
+    "• 내용     :",
+    `    - ${escapeHtml(ctx.abstract)}`
+  ];
+  if (ctx.partial) lines.push(`    - ${escapeHtml(ctx.partial)}`);
+  lines.push(`• 경로     : <i>${escapeHtml(ctx.maskedPath)}</i>`, "", lastLine);
+  return lines.join("\n");
 }
 
 export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
@@ -158,18 +140,25 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
   }
 
   function notifyApproval(view: ApprovalView): void {
-    // Build the card from REDACTED fields only — never raw tool input.
+    // Build the card from REDACTED fields only — never raw tool input. abstractKo/safePartial are
+    // derived from the value-free SafeInput; for file tools the masked path comes from the safe
+    // pathMasked, otherwise from the cwd masked the same way (always useful, always masked).
     const cwd = view.cwd ?? "";
-    const partial = {
-      projectName: cwd ? basename(cwd) : "(작업폴더 없음)",
+    const safe = view.safeInput;
+    const cwdMasked = cwd ? maskPath(cwd) : "(작업폴더 없음)";
+    // File tools carry their own masked path; everything else shows the masked cwd.
+    const maskedPath = safe?.kind === "file" ? safe.pathMasked : cwdMasked;
+    const ctxBase = {
+      projectName: cwd ? projectNameOf(cwd) : "(작업폴더 없음)",
       shortSession: view.sessionId.slice(0, 8),
-      riskPrefix: riskPrefixFor(view.tool),
-      actionText: actionTextFor(view.tool),
-      summary: view.summary,
-      cwd
+      riskMark: riskMarkFor(view.tool),
+      toolLabel: koreanToolLabel(view.tool),
+      abstract: abstractKo(view.tool, safe),
+      partial: safePartial(safe),
+      maskedPath
     };
     const text = renderCard(
-      { ...partial, messageId: 0 },
+      { ...ctxBase, messageId: 0 },
       "대기",
       expiryLine(view.expiresAt)
     );
@@ -182,7 +171,7 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     // Fire-and-forget: must not throw or block the create path.
     void (async () => {
       const sent = await api.sendMessage(config.telegramChatId, text, keyboard);
-      if (sent) rememberMessage(view.requestId, { ...partial, messageId: sent.message_id });
+      if (sent) rememberMessage(view.requestId, { ...ctxBase, messageId: sent.message_id });
     })();
   }
 

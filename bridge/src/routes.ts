@@ -30,7 +30,7 @@ import type { ExpoPush } from "./push/expoPush.js";
 import type { LiveHub } from "./live/liveHub.js";
 import type { TelegramChannel } from "./telegram/poller.js";
 import { config } from "./config.js";
-import { buildSummary, clampLine } from "./redact.js";
+import { buildSummary, clampLine, coerceSafeInput } from "./redact.js";
 
 // Shared side-effects run after a SUCCESSFUL resolve, regardless of which channel resolved it
 // (the HTTP /resolve route or the Telegram button). Kept here so the two callers can't drift:
@@ -95,9 +95,13 @@ export function buildRouter(deps: Deps): Router {
     }
     // Derive the redacted, value-free display summary HERE. We never store the raw inputSummary.
     const summary = buildSummary(body.tool, body.inputSummary);
+    // Validate the structured safe partial (already value-free) for the richer Telegram card.
+    // Backward-tolerant: an old/missing/unknown shape -> undefined -> card falls back gracefully.
+    const safeInput = coerceSafeInput(body.inputSummary);
     const view = approvals.create({
       tool: clampLine(body.tool, 60),
       summary,
+      safeInput,
       cwd: typeof body.cwd === "string" ? clampLine(body.cwd, 200) : undefined,
       sessionId: clampLine(body.sessionId, 80)
     });

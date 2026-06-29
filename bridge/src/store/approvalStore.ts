@@ -15,12 +15,13 @@
 // We never store the full tool input — only the redacted one-line `summary` (see redact.ts).
 
 import { randomUUID } from "node:crypto";
-import type { ApprovalStatus, ApprovalView, Decision } from "../contracts/index.js";
+import type { ApprovalStatus, ApprovalView, Decision, SafeInput } from "../contracts/index.js";
 
 interface StoredApproval {
   requestId: string;
   tool: string;
   summary: string; // REDACTED — never raw tool input
+  safeInput?: SafeInput; // structured safe partial (already value-free); used by the Telegram card
   cwd?: string;
   sessionId: string;
   createdAt: number; // epoch ms
@@ -34,6 +35,7 @@ interface StoredApproval {
 export interface CreateInput {
   tool: string;
   summary: string;
+  safeInput?: SafeInput;
   cwd?: string;
   sessionId: string;
 }
@@ -54,6 +56,7 @@ export class ApprovalStore {
       requestId: randomUUID(),
       tool: input.tool,
       summary: input.summary,
+      safeInput: input.safeInput,
       cwd: input.cwd,
       sessionId: input.sessionId,
       createdAt: now,
@@ -143,6 +146,7 @@ export class ApprovalStore {
       createdAt: new Date(rec.createdAt).toISOString(),
       expiresAt: new Date(rec.expiresAt).toISOString()
     };
+    if (rec.safeInput !== undefined) view.safeInput = rec.safeInput;
     if (rec.cwd !== undefined) view.cwd = rec.cwd;
     if (rec.resolvedAt !== undefined) view.resolvedAt = new Date(rec.resolvedAt).toISOString();
     return view;

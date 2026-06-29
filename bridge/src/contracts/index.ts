@@ -42,12 +42,25 @@ export interface ErrorBody {
   message?: string;
 }
 
+// The hook's redact() emits ONE of these safe partials — structured, value-free, derived from the
+// raw tool_input but carrying NO command bodies / file contents / full paths. The bridge renders a
+// Korean abstract + safe partial from it. Backward-tolerant: an old/missing/unknown shape just
+// falls through to the generic field-name summary.
+export type SafeInput =
+  // Bash: leading program token + an optional PLAIN subcommand + total token count. No args/flags.
+  | { kind: "bash"; prog: string; sub: string | null; argc: number }
+  // File tools: basename + a masked path (root + … + last 2 segments). No file contents.
+  | { kind: "file"; basename: string; pathMasked: string }
+  // Anything else: field NAMES only (the schema, never the values).
+  | { kind: "other"; fields: string[]; count: number };
+
 // ---- POST /v1/approvals (hook -> bridge) -----------------------------------
 // The hook sends a REDACTED summary only. Full tool_input must NEVER cross this boundary.
 export interface CreateApprovalRequest {
   sessionId: string;
   tool: string;
-  // Already-redacted shape map produced by the hook's redact(). Treated as opaque here.
+  // Already-redacted, structured safe partial produced by the hook's redact() (see SafeInput).
+  // Typed as unknown on the wire: the bridge validates the shape before trusting it.
   inputSummary: unknown;
   cwd?: string;
 }
@@ -67,6 +80,9 @@ export interface ApprovalView {
   status: ApprovalStatus;
   // REDACTED one-line summary suitable for display. Never the full tool input.
   summary: string;
+  // The structured safe partial (see SafeInput) when the hook supplied a recognized shape.
+  // Optional + already-safe: omitted on legacy/unknown inputs so older clients still render.
+  safeInput?: SafeInput;
   cwd?: string;
   sessionId: string;
   createdAt: string; // ISO-8601 UTC

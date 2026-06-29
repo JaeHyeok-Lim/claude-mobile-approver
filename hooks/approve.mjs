@@ -16,7 +16,7 @@
 // Config via env (installed in the TARGET project's .claude/settings.json):
 //   BRIDGE_URL    base URL of the bridge        (default http://127.0.0.1:4318)
 //   BRIDGE_TOKEN  shared bearer token           (REQUIRED; missing -> default-deny)
-//   APPROVE_TOTAL_MS    overall budget in ms     (default 120000)
+//   APPROVE_TOTAL_MS    overall budget in ms     (default 600000 = 10 min, matches bridge TTL)
 //   APPROVE_POLL_MS     poll interval in ms      (default 1500)
 //   APPROVE_HTTP_MS     per-request timeout ms   (default 8000)
 
@@ -24,7 +24,7 @@ import { readFileSync } from 'node:fs';
 
 const BRIDGE_URL = (process.env.BRIDGE_URL || 'http://127.0.0.1:4318').replace(/\/+$/, '');
 const TOKEN = process.env.BRIDGE_TOKEN || '';
-const TOTAL_MS = int(process.env.APPROVE_TOTAL_MS, 120000);
+const TOTAL_MS = int(process.env.APPROVE_TOTAL_MS, 600000);
 const POLL_MS = int(process.env.APPROVE_POLL_MS, 1500);
 const HTTP_MS = int(process.env.APPROVE_HTTP_MS, 8000);
 
@@ -61,22 +61,81 @@ function readStdin() {
   }
 }
 
-// Build a redacted summary of the tool input. We send shape/size, never raw values.
-function redact(input) {
-  if (input == null || typeof input !== 'object') return { kind: typeof input };
-  const summary = {};
-  for (const [k, v] of Object.entries(input)) {
-    if (typeof v === 'string') {
-      summary[k] = { type: 'string', len: v.length };
-    } else if (Array.isArray(v)) {
-      summary[k] = { type: 'array', len: v.length };
-    } else if (v && typeof v === 'object') {
-      summary[k] = { type: 'object', keys: Object.keys(v).length };
-    } else {
-      summary[k] = { type: typeof v };
+// Mask a filesystem path to root + … + the LAST 2 segments, collapsing the middle. Handles both
+// \ and / separators. ≤3 segments -> shown as-is. NEVER reveals the full middle of the path.
+// Zero-dep, never throws (caller's redact() also has a catch-all fallback).
+function maskPath(p) {
+  const s = String(p ?? '');
+  // Split on either separator; remember whether it started at filesystem root (/...).
+  const leadingSlash = /^[\\/]/.test(s);
+  const segs = s.split(/[\\/]+/).filter((seg) => seg.length > 0);
+  if (segs.length === 0) return s;
+  // Pick the separator we'll render with: Windows drive paths -> "\", else "/".
+  const sep = /^[A-Za-z]:$/.test(segs[0]) ? '\\' : '/';
+  const head = leadingSlash ? sep : '';
+  // ≤3 segments: short enough to show whole.
+  if (segs.length <= 3) return head + segs.join(sep);
+  const root = segs[0];
+  const tail = segs.slice(-2);
+  return `${head}${root}${sep}…${sep}${tail.join(sep)}`;
+}
+
+const basenameOf = (p) => {
+  const segs = String(p ?? '').split(/[\\/]+/).filter((seg) => seg.length > 0);
+  return segs.at(-1) ?? '';
+};
+
+// SECURITY: this is the trust boundary. The hook holds the RAW tool_input (which may carry
+// secrets in command args, flag values, or file contents). We emit ONLY safe partials —
+// program + plain subcommand for Bash, basenames + masked paths for file tools, field NAMES
+// otherwise — NEVER raw command bodies, flag values, or file contents.
+//
+// Shapes emitted (all consumed by the bridge's renderer; backward-tolerant):
+//   { kind:"bash",  prog, sub|null, argc }
+//   { kind:"file",  basename, pathMasked }
+//   { kind:"other", fields:[...names], count }
+function redact(tool, input) {
+  try {
+    if (input == null || typeof input !== 'object') {
+      return { kind: 'other', fields: [], count: 0 };
     }
+
+    if (tool === 'Bash' && typeof input.command === 'string') {
+      // Token #1 = the program. Token #2 = a plain subcommand ONLY (no =,:,/,\,quotes, ≤16,
+      // not a flag). Everything after — args, flags, values — is DROPPED (may hold secrets).
+      const tokens = input.command.trim().split(/\s+/).filter((t) => t.length > 0);
+      // SECURITY: token #1 is attacker-controlled free text — it can be an env assignment
+      // (`SECRET=… cmd`), an absolute path (`/home/u/.private/tool`), a subshell (`$(…)`), or a
+      // quoted value. Emit it ONLY if it's a plausible bare program name; otherwise it may carry
+      // a secret/path -> redact to a placeholder. (Same discipline as `sub`, slightly longer.)
+      const SAFE_PROG = /^[A-Za-z][\w.-]{0,31}$/;
+      const rawProg = tokens[0] ?? '';
+      const prog = SAFE_PROG.test(rawProg) ? rawProg : '(명령)';
+      const second = tokens[1];
+      const sub = second && /^[A-Za-z][\w.-]{0,15}$/.test(second) ? second : null;
+      return { kind: 'bash', prog, sub, argc: tokens.length };
+    }
+
+    if (
+      (tool === 'Edit' ||
+        tool === 'MultiEdit' ||
+        tool === 'Write' ||
+        tool === 'Read' ||
+        tool === 'NotebookEdit') &&
+      (typeof input.file_path === 'string' || typeof input.notebook_path === 'string')
+    ) {
+      // ONLY the basename + masked path. The content (old_string/new_string/content) is DROPPED.
+      const path = typeof input.file_path === 'string' ? input.file_path : input.notebook_path;
+      return { kind: 'file', basename: basenameOf(path), pathMasked: maskPath(path) };
+    }
+
+    // Other tools: field NAMES only (the schema, not the secret values).
+    const fields = Object.keys(input);
+    return { kind: 'other', fields, count: fields.length };
+  } catch {
+    // Anything weird -> safest possible fallback. Never throws past here.
+    return { kind: 'other', fields: [], count: 0 };
   }
-  return summary;
 }
 
 async function fetchJson(path, opts) {
@@ -122,7 +181,7 @@ async function main() {
   const payload = {
     sessionId: input.session_id || 'local',
     tool: input.tool_name || 'unknown',
-    inputSummary: redact(input.tool_input),
+    inputSummary: redact(input.tool_name, input.tool_input),
     cwd: input.cwd || process.cwd(),
   };
 
@@ -163,4 +222,13 @@ async function main() {
   return deny(`no decision within ${TOTAL_MS}ms (${requestId})`);
 }
 
-main().catch(() => deny('unexpected error'));
+// Run the gate only when invoked as the hook entry point — not when imported by a test, which
+// asserts the security-critical redact()/maskPath() in isolation without touching stdin/network.
+import { argv } from 'node:process';
+import { fileURLToPath } from 'node:url';
+
+if (argv[1] && fileURLToPath(import.meta.url) === argv[1]) {
+  main().catch(() => deny('unexpected error'));
+}
+
+export { redact, maskPath };
