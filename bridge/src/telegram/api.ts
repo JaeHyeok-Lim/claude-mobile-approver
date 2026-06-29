@@ -42,6 +42,12 @@ function tokenFp(token: string): string {
   return `len=${token.length}`;
 }
 
+// Escape the 3 chars that are special in Telegram's HTML parse_mode, so a dynamic value (project
+// name, cwd, redacted summary) can never break the markup or inject tags. Only & < > — nothing else.
+export function escapeHtml(s: string): string {
+  return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
 export function createTelegramApi(opts: { apiBase: string; token: string }): TelegramApi {
   const { apiBase, token } = opts;
   const base = `${apiBase}/bot${token}`;
@@ -79,14 +85,18 @@ export function createTelegramApi(opts: { apiBase: string; token: string }): Tel
 
   return {
     async sendMessage(chatId, text, inlineKeyboard) {
-      const body: Record<string, unknown> = { chat_id: chatId, text };
+      const body: Record<string, unknown> = { chat_id: chatId, text, parse_mode: "HTML" };
       if (inlineKeyboard) body.reply_markup = { inline_keyboard: inlineKeyboard };
       const result = await call<{ message_id: number }>("sendMessage", body, 8000);
       return result ? { message_id: result.message_id } : null;
     },
 
     async editMessageText(chatId, messageId, text) {
-      await call("editMessageText", { chat_id: chatId, message_id: messageId, text }, 8000);
+      await call(
+        "editMessageText",
+        { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" },
+        8000
+      );
     },
 
     async answerCallbackQuery(callbackQueryId, text) {

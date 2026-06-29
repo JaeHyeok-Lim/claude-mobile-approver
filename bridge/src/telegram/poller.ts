@@ -3,22 +3,25 @@
 // send/poll fails an approval simply stays pending until TTL -> default-deny.
 //
 // Two halves:
-//   notifyApproval(view) — push a redacted approval card with ✅/❌ inline buttons to the chat.
+//   notifyApproval(view) — push a redacted approval card with [ 승인 ]/[ 거부 ] inline buttons to
+//                          the chat. TEXT-favored Korean format (HTML parse_mode); the ONLY emoji
+//                          anywhere is the ⚠️ risk prefix for mutating tools.
 //   start()/stop()       — a single long-poll getUpdates loop turning button taps into
-//                          approvals.resolve(...) calls, AFTER authorizing the sender.
+//                          approvals.resolve(...) calls, AFTER authorizing the sender. The same
+//                          loop also reconciles tracked cards whose store state went terminal on
+//                          its own (TTL expiry, or a resolve via the web app) by editing them ONCE.
 //
 // SECURITY: authorize-first (deny-all). Until TELEGRAM_CHAT_ID is set, or if the tap comes from
 // any other chat/user, we resolve NOTHING. callback_data is parsed with a strict regex. Only the
 // store decides outcomes; we just translate taps and mirror the resolve route's side-effects via
 // the shared notifyResolved helper, so the two channels can't drift.
 
-import { basename } from "node:path";
 import type { ApprovalView, Decision } from "../contracts/index.js";
 import type { EventStore } from "../store/eventStore.js";
 import type { ApprovalStore } from "../store/approvalStore.js";
 import type { LiveHub } from "../live/liveHub.js";
 import { notifyResolved } from "../routes.js";
-import { createTelegramApi, type TelegramApi, type TelegramUpdate } from "./api.js";
+import { createTelegramApi, escapeHtml, type TelegramApi, type TelegramUpdate } from "./api.js";
 
 export interface TelegramChannel {
   notifyApproval(view: ApprovalView): void;
@@ -48,15 +51,87 @@ export interface TelegramDeps {
 // Strict callback_data: action prefix + a UUID (the requestId). Anything else is dropped.
 const CALLBACK_RE = /^(a|d):([0-9a-fA-F-]{36})$/;
 
-// Cap the requestId -> message_id map so a flood of approvals can't grow it unbounded.
+// Cap the requestId -> tracked-card map so a flood of approvals can't grow it unbounded.
 const MESSAGE_MAP_CAP = 200;
 
-function relativeExpiry(expiresAt: string): string {
+// How often the poll loop reconciles tracked cards against the store (TTL-expiry / web-resolve).
+const RECONCILE_MS = 15_000;
+
+// Tools that MUTATE state (run code / write files). Only these get the ⚠️ risk prefix — the one
+// sanctioned emoji in the whole card. Everything else is plain TEXT.
+const RISKY_TOOLS = new Set(["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"]);
+
+// The display context we keep per tracked request so an edited card (decision/expiry/web-resolve)
+// can re-render lines 1–3 verbatim and only swap the leading status tag + line 4.
+interface CardContext {
+  messageId: number;
+  projectName: string;
+  shortSession: string;
+  riskPrefix: string;
+  actionText: string;
+  summary: string;
+  cwd: string;
+  // Set once we've edited the card into a terminal state, so reconcile never re-edits it.
+  edited?: boolean;
+}
+
+// Last path segment of a cwd, tolerating both \ and / separators. Empty/missing -> a TEXT fallback.
+function basename(cwd: string): string {
+  const parts = cwd.split(/[\\/]+/).filter((p) => p.length > 0);
+  return parts.at(-1) ?? "(작업폴더 없음)";
+}
+
+// ⚠️ ONLY for mutating tools (the important-warning exception); plain "" otherwise.
+function riskPrefixFor(tool: string): string {
+  return RISKY_TOOLS.has(tool) ? "⚠️ " : "";
+}
+
+// TEXT-only action label (no tool emoji). Never throws on an unknown tool.
+function actionTextFor(tool: string): string {
+  switch (tool) {
+    case "Bash":
+      return "Bash 명령 실행";
+    case "Edit":
+    case "MultiEdit":
+      return "파일 수정(Edit)";
+    case "Write":
+      return "파일 생성·덮어쓰기(Write)";
+    case "Read":
+      return "파일 읽기(Read)";
+    case "WebFetch":
+    case "WebSearch":
+      return `웹 요청(${tool})`;
+    case "Glob":
+    case "Grep":
+      return `파일 검색(${tool})`;
+    default:
+      return `${tool} 실행 요청`;
+  }
+}
+
+// Clamp the cwd to its last 64 chars (prefix … when truncated), then escape for HTML.
+function clampCwd(cwd: string): string {
+  const trimmed = cwd.length > 64 ? `…${cwd.slice(-64)}` : cwd;
+  return escapeHtml(trimmed);
+}
+
+// Static expiry line computed at send time (no live countdown). TEXT only, no emoji.
+function expiryLine(expiresAt: string): string {
   const ms = new Date(expiresAt).getTime() - Date.now();
-  if (ms <= 0) return "만료됨";
-  const sec = Math.round(ms / 1000);
-  if (sec < 60) return `${sec}초 후 만료`;
-  return `${Math.round(sec / 60)}분 후 만료`;
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec >= 60) return `<b>${Math.round(sec / 60)}분</b> 내 미응답 시 자동 거부`;
+  return `<b>${sec}초</b> 내 미응답 시 자동 거부`;
+}
+
+// Render the 4-line card body. `statusTag` is the bracketed status word at line start; `line4` is
+// the bottom status/expiry line. Lines 1–3 are identical across pending and every edited state.
+function renderCard(ctx: CardContext, statusTag: string, line4: string): string {
+  const line1 = `[${statusTag}] <b>${escapeHtml(ctx.projectName)}</b>  <code>#${escapeHtml(
+    ctx.shortSession
+  )}</code>`;
+  const line2 = `${ctx.riskPrefix}${escapeHtml(ctx.actionText)} · ${escapeHtml(ctx.summary)}`;
+  const line3 = `<i>${clampCwd(ctx.cwd)}</i>`;
+  return `${line1}\n${line2}\n${line3}\n${line4}`;
 }
 
 export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
@@ -65,37 +140,63 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     deps.api ??
     createTelegramApi({ apiBase: config.telegramApiBase, token: config.telegramBotToken });
 
-  // requestId -> the chat message we sent, so the outcome can edit that exact card.
-  const messages = new Map<string, number>();
+  // requestId -> the chat card we sent + the display context to re-render it, so the outcome can
+  // edit that exact card (lines 1–3 verbatim, status tag + line 4 swapped).
+  const messages = new Map<string, CardContext>();
 
   let running = false;
   let stopped = false;
   let offset = 0;
+  let lastReconcile = 0;
 
-  function rememberMessage(requestId: string, messageId: number): void {
+  function rememberMessage(requestId: string, ctx: CardContext): void {
     if (messages.size >= MESSAGE_MAP_CAP) {
       const oldest = messages.keys().next().value;
       if (oldest !== undefined) messages.delete(oldest);
     }
-    messages.set(requestId, messageId);
+    messages.set(requestId, ctx);
   }
 
   function notifyApproval(view: ApprovalView): void {
     // Build the card from REDACTED fields only — never raw tool input.
-    const dir = view.cwd ? basename(view.cwd) : "(no cwd)";
-    const label = `📁 ${dir} #${view.sessionId.slice(0, 8)} — ${view.tool} · ${view.summary}`;
-    const text = `${label}\n⏳ ${relativeExpiry(view.expiresAt)}`;
+    const cwd = view.cwd ?? "";
+    const partial = {
+      projectName: cwd ? basename(cwd) : "(작업폴더 없음)",
+      shortSession: view.sessionId.slice(0, 8),
+      riskPrefix: riskPrefixFor(view.tool),
+      actionText: actionTextFor(view.tool),
+      summary: view.summary,
+      cwd
+    };
+    const text = renderCard(
+      { ...partial, messageId: 0 },
+      "대기",
+      expiryLine(view.expiresAt)
+    );
     const keyboard = [
       [
-        { text: "✅ 승인", callback_data: `a:${view.requestId}` },
-        { text: "❌ 거부", callback_data: `d:${view.requestId}` }
+        { text: "승인", callback_data: `a:${view.requestId}` },
+        { text: "거부", callback_data: `d:${view.requestId}` }
       ]
     ];
     // Fire-and-forget: must not throw or block the create path.
     void (async () => {
       const sent = await api.sendMessage(config.telegramChatId, text, keyboard);
-      if (sent) rememberMessage(view.requestId, sent.message_id);
+      if (sent) rememberMessage(view.requestId, { ...partial, messageId: sent.message_id });
     })();
+  }
+
+  // Edit a tracked card into one of its terminal states ONCE, then mark it edited so neither a
+  // later tap nor the reconcile sweep re-edits it. Best-effort; never throws (api swallows errors).
+  async function editTerminal(
+    requestId: string,
+    tag: string,
+    line4: string
+  ): Promise<void> {
+    const ctx = messages.get(requestId);
+    if (!ctx || ctx.edited) return;
+    ctx.edited = true;
+    await api.editMessageText(config.telegramChatId, ctx.messageId, renderCard(ctx, tag, line4));
   }
 
   // Translate one update into (at most) one resolve. Exposed for tests.
@@ -136,42 +237,73 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     }
     // (d) action -> decision.
     const decision: Decision = m[1] === "a" ? "allow" : "deny";
-    const requestId = m[2] as string;
-    const messageId = messages.get(requestId);
+    const requestId = m[2]!;
 
-    // (e) Resolve through the store and branch on its discriminated result.
+    // (e) Resolve through the store and branch on its discriminated result. The card is re-rendered
+    // (lines 1–3 verbatim) with the new status tag + line 4 via editTerminal.
     const result = approvals.resolve(requestId, decision);
     if (result.ok) {
       notifyResolved({ events, live }, result.view, decision);
-      if (messageId !== undefined) {
-        await api.editMessageText(
-          chatId,
-          messageId,
-          decision === "allow" ? "✅ 승인됨" : "❌ 거부됨"
-        );
+      if (decision === "allow") {
+        await editTerminal(requestId, "승인됨", "<b>승인됨</b>");
+        await api.answerCallbackQuery(cq.id, "승인됨");
+      } else {
+        await editTerminal(requestId, "거부됨", "<b>거부됨</b>");
+        await api.answerCallbackQuery(cq.id, "거부됨");
       }
-      await api.answerCallbackQuery(cq.id, decision === "allow" ? "승인됨" : "거부됨");
       return;
     }
     // Failure branches mirror the HTTP resolve route's semantics.
     if (result.reason === "expired") {
-      if (messageId !== undefined) {
-        await api.editMessageText(chatId, messageId, "⌛ 만료됨 (자동 거부)");
-      }
+      await editTerminal(requestId, "만료", "<b>만료됨</b> · 자동 거부");
       await api.answerCallbackQuery(cq.id, "만료됨");
     } else if (result.reason === "already_resolved") {
-      if (messageId !== undefined) {
-        await api.editMessageText(chatId, messageId, "이미 처리됨");
-      }
+      await editTerminal(requestId, "이미처리", "<b>이미 처리됨</b>");
       await api.answerCallbackQuery(cq.id, "이미 처리됨");
     } else {
-      // not_found
+      // not_found — nothing tracked to edit.
       await api.answerCallbackQuery(cq.id, "알 수 없는 요청");
+    }
+  }
+
+  // Reconcile tracked cards against the store: any whose state went terminal on its own — TTL
+  // expiry, or a resolve via the web app — gets edited ONCE then dropped from the map, so an
+  // untapped expired card never shows a stale "대기" forever. Best-effort, idempotent, never throws.
+  async function reconcile(): Promise<void> {
+    for (const [requestId, ctx] of [...messages]) {
+      if (ctx.edited) {
+        messages.delete(requestId);
+        continue;
+      }
+      const view = approvals.get(requestId);
+      if (!view || view.status === "pending") continue;
+      if (view.status === "allow") {
+        await editTerminal(requestId, "승인됨", "<b>승인됨</b>");
+      } else if (view.status === "deny") {
+        await editTerminal(requestId, "거부됨", "<b>거부됨</b>");
+      } else {
+        // "expired"
+        await editTerminal(requestId, "만료", "<b>만료됨</b> · 자동 거부");
+      }
+      messages.delete(requestId);
+    }
+  }
+
+  // Throttle reconcile to ~RECONCILE_MS regardless of poll cadence. Best-effort; swallows errors.
+  async function maybeReconcile(): Promise<void> {
+    const now = Date.now();
+    if (now - lastReconcile < RECONCILE_MS) return;
+    lastReconcile = now;
+    try {
+      await reconcile();
+    } catch (err) {
+      console.warn(`[telegram] reconcile failed: ${(err as Error)?.name ?? "error"}`);
     }
   }
 
   async function loop(): Promise<void> {
     while (!stopped) {
+      await maybeReconcile();
       const updates = await api.getUpdates(offset, config.telegramPollTimeoutSec);
       if (stopped) break;
       if (updates.length === 0) {
