@@ -32,3 +32,4 @@ web-build/
 docs/HANDOFF.md
 docs/backlog.md
 docs/staffing.md
+*.local.md
