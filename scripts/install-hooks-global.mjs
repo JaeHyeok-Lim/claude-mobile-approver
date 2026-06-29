@@ -42,13 +42,16 @@ const APPROVE = join(REPO_ROOT, "hooks", "approve.mjs");
 const NOTIFY = join(REPO_ROOT, "hooks", "notify.mjs");
 
 const BRIDGE_URL = "http://127.0.0.1:4318";
-// Read the shared token from bridge/.env at install time so the global hook can authenticate.
+// Read the token ONLY to sanity-check it exists — we do NOT write it into settings.json. The hook
+// resolves BRIDGE_TOKEN from bridge/.env itself at runtime (Claude Code does not reliably forward
+// the hook `env` block, and keeping the secret out of settings.json is better hygiene).
 const bridgeToken = (parseDotEnv(join(BRIDGE_DIR, ".env")).BRIDGE_TOKEN || "").trim();
 
 // Commands we manage. quoting the absolute path keeps spaces (e.g. "C:\Users\…") safe.
 const cmdApprove = `"${NODE}" "${APPROVE}"`;
 const cmdNotify = (kind) => `"${NODE}" "${NOTIFY}" ${kind}`;
-const hookEnv = { BRIDGE_URL, BRIDGE_TOKEN: bridgeToken };
+// Only a non-secret hint goes into settings.json; the token is read from bridge/.env by the hook.
+const hookEnv = { BRIDGE_URL };
 
 // The four hook entries this installer owns. Shape matches Claude Code's settings schema:
 //   hooks.<Event> = [ { matcher?, hooks: [ { type:"command", command, env } ] } ]
@@ -105,7 +108,7 @@ function tokenNote() {
   if (!bridgeToken) {
     return "WARNING: no BRIDGE_TOKEN found in bridge/.env — the hook will default-DENY every call. Set it before --apply.";
   }
-  return `BRIDGE_TOKEN sourced from bridge/.env (present, len ${bridgeToken.length}) — written into the hook env.`;
+  return `BRIDGE_TOKEN present in bridge/.env (len ${bridgeToken.length}) — the hook reads it from there at runtime (NOT stored in settings.json).`;
 }
 
 function printPlan(changes) {
@@ -119,7 +122,7 @@ function printPlan(changes) {
     } else {
       const matcher = c.matcher ? `matcher "${c.matcher}" ` : "(no matcher) ";
       log("install-hooks", `  [${c.event}] ADD ${matcher}-> ${c.command}`);
-      log("install-hooks", `            env: BRIDGE_URL, BRIDGE_TOKEN (value redacted)`);
+      log("install-hooks", `            env: BRIDGE_URL (BRIDGE_TOKEN resolved from bridge/.env at runtime)`);
     }
   }
   log("install-hooks", "------------------------------------------");
