@@ -21,9 +21,33 @@
 //   APPROVE_HTTP_MS     per-request timeout ms   (default 8000)
 
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+// (fileURLToPath is imported once below, near the entry-point guard; ESM hoists it module-wide.)
 
-const BRIDGE_URL = (process.env.BRIDGE_URL || 'http://127.0.0.1:4318').replace(/\/+$/, '');
-const TOKEN = process.env.BRIDGE_TOKEN || '';
+// Resolve config from env FIRST, then fall back to the bridge's .env (this file is
+// <repo>/hooks/approve.mjs, so ../bridge/.env). This makes the gate work even when Claude Code
+// does NOT forward the settings.json hook `env` block to the hook process (version-dependent),
+// and keeps BRIDGE_TOKEN out of settings.json. Node reading its own sibling config file is fine —
+// it is NOT the `powershell -Bypass` secret-grep + HTTP pattern that AV heuristics flag.
+function fromEnvFile(key) {
+  try {
+    const envPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'bridge', '.env');
+    for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i !== -1 && t.slice(0, i).trim() === key) {
+        let v = t.slice(i + 1).trim();
+        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+        return v;
+      }
+    }
+  } catch { /* no/unreadable .env -> fall through to default/empty */ }
+  return '';
+}
+
+const BRIDGE_URL = (process.env.BRIDGE_URL || fromEnvFile('BRIDGE_URL') || 'http://127.0.0.1:4318').replace(/\/+$/, '');
+const TOKEN = process.env.BRIDGE_TOKEN || fromEnvFile('BRIDGE_TOKEN');
 const TOTAL_MS = int(process.env.APPROVE_TOTAL_MS, 600000);
 const POLL_MS = int(process.env.APPROVE_POLL_MS, 1500);
 const HTTP_MS = int(process.env.APPROVE_HTTP_MS, 8000);

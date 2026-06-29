@@ -16,9 +16,31 @@
 // SECURITY: never send the full tool_input (may contain secrets) — only a redacted summary.
 
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const BRIDGE_URL = (process.env.BRIDGE_URL || 'http://127.0.0.1:4318').replace(/\/+$/, '');
-const TOKEN = process.env.BRIDGE_TOKEN || '';
+// Resolve config from env FIRST, then fall back to the bridge's .env (../bridge/.env relative to
+// this hook) — so reporting works even when Claude Code doesn't forward the settings.json hook
+// `env` block. Node reading its own sibling config is benign (not the pwsh-grep AV pattern).
+function fromEnvFile(key) {
+  try {
+    const envPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'bridge', '.env');
+    for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i !== -1 && t.slice(0, i).trim() === key) {
+        let v = t.slice(i + 1).trim();
+        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+        return v;
+      }
+    }
+  } catch { /* no/unreadable .env -> fall through */ }
+  return '';
+}
+
+const BRIDGE_URL = (process.env.BRIDGE_URL || fromEnvFile('BRIDGE_URL') || 'http://127.0.0.1:4318').replace(/\/+$/, '');
+const TOKEN = process.env.BRIDGE_TOKEN || fromEnvFile('BRIDGE_TOKEN');
 const HTTP_MS = (() => {
   const n = Number.parseInt(process.env.NOTIFY_HTTP_MS, 10);
   return Number.isFinite(n) && n > 0 ? n : 4000;
