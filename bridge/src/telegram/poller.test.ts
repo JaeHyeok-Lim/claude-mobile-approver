@@ -14,26 +14,33 @@ import type { TelegramApi, TelegramUpdate } from "./api.js";
 const CHAT = "123456";
 
 // Records every api call so tests can assert the side-effects (edits/answers/sends).
-function fakeApi() {
+function fakeApi(opts: { topicFails?: boolean } = {}) {
   const calls = {
-    sends: [] as Array<{ chatId: string; text: string }>,
-    edits: [] as Array<{ messageId: number; text: string }>,
-    answers: [] as Array<{ id: string; text?: string }>
+    sends: [] as Array<{ chatId: string; text: string; threadId?: number }>,
+    edits: [] as Array<{ messageId: number; text: string; threadId?: number }>,
+    answers: [] as Array<{ id: string; text?: string }>,
+    topics: [] as Array<{ chatId: string; name: string }>
   };
   let nextMessageId = 1000;
+  let nextThreadId = 5000;
   const api: TelegramApi = {
-    async sendMessage(chatId, text) {
-      calls.sends.push({ chatId, text });
+    async sendMessage(chatId, text, _keyboard, threadId) {
+      calls.sends.push({ chatId, text, threadId });
       return { message_id: nextMessageId++ };
     },
-    async editMessageText(_chatId, messageId, text) {
-      calls.edits.push({ messageId, text });
+    async editMessageText(_chatId, messageId, text, threadId) {
+      calls.edits.push({ messageId, text, threadId });
     },
     async answerCallbackQuery(id, text) {
       calls.answers.push({ id, text });
     },
     async getUpdates() {
       return [];
+    },
+    async createForumTopic(chatId, name) {
+      calls.topics.push({ chatId, name });
+      if (opts.topicFails) return null;
+      return { message_thread_id: nextThreadId++ };
     }
   };
   return { api, calls };
@@ -53,7 +60,9 @@ function setup(chatId = CHAT) {
       telegramBotToken: "test-token",
       telegramChatId: chatId,
       telegramApiBase: "http://fake.invalid",
-      telegramPollTimeoutSec: 1
+      telegramPollTimeoutSec: 1,
+      telegramAllowedUserId: "",
+      telegramTopics: false
     }
   });
   return { approvals, events, channel, calls };
@@ -161,7 +170,9 @@ test("expired request -> '만료됨' branch, never flipped to allow", async () =
       telegramBotToken: "t",
       telegramChatId: CHAT,
       telegramApiBase: "http://fake.invalid",
-      telegramPollTimeoutSec: 1
+      telegramPollTimeoutSec: 1,
+      telegramAllowedUserId: "",
+      telegramTopics: false
     }
   });
   const view = approvals.create({ tool: "Bash", summary: "s", sessionId: "x" });
@@ -211,7 +222,9 @@ async function renderSentCard(view: import("../contracts/index.js").ApprovalView
       telegramBotToken: "t",
       telegramChatId: CHAT,
       telegramApiBase: "http://fake.invalid",
-      telegramPollTimeoutSec: 1
+      telegramPollTimeoutSec: 1,
+      telegramAllowedUserId: "",
+      telegramTopics: false
     }
   });
   channel.notifyApproval(view);
@@ -290,6 +303,176 @@ test("legacy/missing safeInput still renders (backward-tolerant) without a parti
   assert.ok(card.includes("파일 읽기"), "falls back to tool label");
   assert.ok(card.includes("[대기] 승인 요청"));
   assert.ok(card.includes("/srv/app"), "short cwd shown as-is");
+});
+
+// ---- Supergroup + per-session Topics mode ----
+
+const GROUP = "-1001234567890"; // a supergroup id
+const ALLOWED_USER = "777"; // the one user permitted to resolve in group mode
+
+// Build a channel in topics mode (supergroup + allowed user). topicFails simulates a bot that
+// can't create topics (not admin / Topics off) -> General-topic fallback.
+function setupTopics(opts: { topicFails?: boolean } = {}) {
+  const approvals = new ApprovalStore({ ttlMs: 60_000, retainMs: 60_000 });
+  const events = new EventStore({ max: 50 });
+  const live = new LiveHub({ maxClients: 10, maxPerIp: 10 });
+  const { api, calls } = fakeApi(opts);
+  const channel = createTelegramChannel({
+    approvals,
+    events,
+    live,
+    api,
+    config: {
+      telegramBotToken: "test-token",
+      telegramChatId: GROUP,
+      telegramApiBase: "http://fake.invalid",
+      telegramPollTimeoutSec: 1,
+      telegramAllowedUserId: ALLOWED_USER,
+      telegramTopics: true
+    }
+  });
+  return { approvals, events, channel, calls };
+}
+
+// Let the fire-and-forget notifyApproval chain settle (createForumTopic -> sendMessage = a couple
+// of microtask hops).
+async function flush() {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+test("topics: a topic is created once per session and reused, cards carry its message_thread_id", async () => {
+  const { approvals, channel, calls } = setupTopics();
+  // Two approvals in the SAME session.
+  const v1 = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-aaaaaaaa1111" });
+  const v2 = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-aaaaaaaa1111" });
+  channel.notifyApproval(v1);
+  await flush();
+  channel.notifyApproval(v2);
+  await flush();
+
+  // Exactly ONE topic created for the session, reused for both cards.
+  assert.equal(calls.topics.length, 1, "topic created once per session");
+  const threadId = 5000;
+  assert.equal(calls.sends.length, 2);
+  assert.ok(
+    calls.sends.every((s) => s.threadId === threadId),
+    "both cards carry the same message_thread_id"
+  );
+  assert.ok(calls.sends.every((s) => s.chatId === GROUP), "cards sent to the supergroup");
+  // Topic name = projectName + #shortSession (no cwd here -> the no-folder fallback).
+  assert.ok(calls.topics[0]?.name.includes("#sess-aaa"), "topic name carries the short session");
+});
+
+test("topics: a SECOND session gets its OWN topic", async () => {
+  const { approvals, channel, calls } = setupTopics();
+  const a = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-aaaaaaaa" });
+  const b = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-bbbbbbbb" });
+  channel.notifyApproval(a);
+  await flush();
+  channel.notifyApproval(b);
+  await flush();
+  assert.equal(calls.topics.length, 2, "one topic per distinct session");
+  assert.equal(calls.sends[0]?.threadId, 5000);
+  assert.equal(calls.sends[1]?.threadId, 5001);
+});
+
+test("topics: edits target the same thread as the card", async () => {
+  const { approvals, channel, calls } = setupTopics();
+  const view = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-cccccccc" });
+  channel.notifyApproval(view);
+  await flush();
+  const threadId = calls.sends.at(-1)?.threadId;
+  assert.equal(threadId, 5000);
+  // Authorized resolve -> edit must carry the same thread id.
+  await channel.handle({
+    update_id: 1,
+    callback_query: {
+      id: "cbq-topic",
+      data: `a:${view.requestId}`,
+      from: { id: Number(ALLOWED_USER) },
+      message: { message_id: 1000, chat: { id: Number(GROUP) } }
+    }
+  });
+  assert.equal(approvals.get(view.requestId)?.status, "allow");
+  assert.ok(calls.edits.some((e) => e.threadId === threadId), "edit targets the card's thread");
+});
+
+test("topics: createForumTopic failure falls back to General topic (no thread id), never retries", async () => {
+  const { approvals, channel, calls } = setupTopics({ topicFails: true });
+  const v1 = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-dddddddd" });
+  const v2 = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-dddddddd" });
+  channel.notifyApproval(v1);
+  await flush();
+  channel.notifyApproval(v2);
+  await flush();
+  // Tried once, cached the sentinel, did NOT retry on the second card.
+  assert.equal(calls.topics.length, 1, "create attempted once then cached as failed");
+  assert.equal(calls.sends.length, 2);
+  assert.ok(
+    calls.sends.every((s) => s.threadId === undefined),
+    "fallback cards carry NO thread id (General topic)"
+  );
+});
+
+test("group auth: an allowlisted user's tap is accepted and resolves", async () => {
+  const { approvals, channel } = setupTopics();
+  const view = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-eeeeeeee" });
+  channel.notifyApproval(view);
+  await flush();
+  await channel.handle({
+    update_id: 1,
+    callback_query: {
+      id: "cbq-ok",
+      data: `a:${view.requestId}`,
+      from: { id: Number(ALLOWED_USER) },
+      message: { message_id: 1000, chat: { id: Number(GROUP) } }
+    }
+  });
+  assert.equal(approvals.get(view.requestId)?.status, "allow");
+});
+
+test("group auth: a NON-allowlisted member (group member, wrong from.id) is REJECTED, resolves nothing", async () => {
+  const { approvals, channel, calls } = setupTopics();
+  const view = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-ffffffff" });
+  channel.notifyApproval(view);
+  await flush();
+  // Another member of the SAME supergroup taps. msgChatId matches the group, but from.id is NOT
+  // the allowed user -> must be rejected (group membership is not sufficient).
+  await channel.handle({
+    update_id: 2,
+    callback_query: {
+      id: "cbq-intruder",
+      data: `a:${view.requestId}`,
+      from: { id: 888 }, // a different group member
+      message: { message_id: 1000, chat: { id: Number(GROUP) } }
+    }
+  });
+  assert.equal(approvals.get(view.requestId)?.status, "pending", "untouched");
+  assert.ok(
+    calls.answers.some((a) => a.id === "cbq-intruder" && a.text === "권한 없음"),
+    "rejected with 권한 없음"
+  );
+  assert.ok(!calls.edits.some((e) => e.text.includes("승인")), "no terminal edit");
+});
+
+test("group auth: a tap whose from.id matches the GROUP chat id (not the user) is REJECTED", async () => {
+  // Defense: in group mode we must never authorize by chat.id. A spoofed from.id == the group id
+  // is not the allowed user -> reject.
+  const { approvals, channel, calls } = setupTopics();
+  const view = approvals.create({ tool: "Bash", summary: "s", sessionId: "sess-gggggggg" });
+  channel.notifyApproval(view);
+  await flush();
+  await channel.handle({
+    update_id: 3,
+    callback_query: {
+      id: "cbq-chatid",
+      data: `a:${view.requestId}`,
+      from: { id: Number(GROUP) }, // the chat id, NOT the allowed user id
+      message: { message_id: 1000, chat: { id: Number(GROUP) } }
+    }
+  });
+  assert.equal(approvals.get(view.requestId)?.status, "pending");
+  assert.ok(calls.answers.some((a) => a.id === "cbq-chatid" && a.text === "권한 없음"));
 });
 
 test("/start bootstrap logs/sends the chat_id and resolves nothing", async () => {

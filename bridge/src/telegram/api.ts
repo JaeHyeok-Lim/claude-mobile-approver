@@ -30,11 +30,20 @@ export interface TelegramApi {
   sendMessage(
     chatId: string,
     text: string,
-    inlineKeyboard?: InlineButton[][]
+    inlineKeyboard?: InlineButton[][],
+    threadId?: number
   ): Promise<{ message_id: number } | null>;
-  editMessageText(chatId: string, messageId: number, text: string): Promise<void>;
+  editMessageText(
+    chatId: string,
+    messageId: number,
+    text: string,
+    threadId?: number
+  ): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   getUpdates(offset: number, timeoutSec: number): Promise<TelegramUpdate[]>;
+  // Create a forum topic (thread) in a supergroup. Returns its message_thread_id, or null on any
+  // failure (bot not admin, chat isn't a forum, API/network error) — best-effort, never throws.
+  createForumTopic(chatId: string, name: string): Promise<{ message_thread_id: number } | null>;
 }
 
 // Redacted token fingerprint for logs: length only, never the value.
@@ -84,19 +93,32 @@ export function createTelegramApi(opts: { apiBase: string; token: string }): Tel
   }
 
   return {
-    async sendMessage(chatId, text, inlineKeyboard) {
+    async sendMessage(chatId, text, inlineKeyboard, threadId) {
       const body: Record<string, unknown> = { chat_id: chatId, text, parse_mode: "HTML" };
       if (inlineKeyboard) body.reply_markup = { inline_keyboard: inlineKeyboard };
+      if (threadId !== undefined) body.message_thread_id = threadId;
       const result = await call<{ message_id: number }>("sendMessage", body, 8000);
       return result ? { message_id: result.message_id } : null;
     },
 
-    async editMessageText(chatId, messageId, text) {
-      await call(
-        "editMessageText",
-        { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" },
+    async editMessageText(chatId, messageId, text, threadId) {
+      const body: Record<string, unknown> = {
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        parse_mode: "HTML"
+      };
+      if (threadId !== undefined) body.message_thread_id = threadId;
+      await call("editMessageText", body, 8000);
+    },
+
+    async createForumTopic(chatId, name) {
+      const result = await call<{ message_thread_id: number }>(
+        "createForumTopic",
+        { chat_id: chatId, name },
         8000
       );
+      return result ? { message_thread_id: result.message_thread_id } : null;
     },
 
     async answerCallbackQuery(callbackQueryId, text) {

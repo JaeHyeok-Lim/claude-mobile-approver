@@ -58,7 +58,15 @@ export const config = {
   // No bot token -> channel disabled and the bridge behaves exactly as v1. Telegram never gates:
   // if send/poll fails the approval just stays pending -> TTL -> deny.
   telegramBotToken: (process.env.TELEGRAM_BOT_TOKEN || "").trim(),
+  // 1:1 mode: a private chat id (== the user id). Topics mode: a SUPERGROUP id (negative, -100…).
   telegramChatId: (process.env.TELEGRAM_CHAT_ID || "").trim(),
+  // The numeric Telegram USER id allowed to resolve approvals. REQUIRED in group/topics mode,
+  // where the callback's from.id is the tapping user, not the chat. Empty in 1:1 mode (the chat
+  // id doubles as the user id there).
+  telegramAllowedUserId: (process.env.TELEGRAM_ALLOWED_USER_ID || "").trim(),
+  // When true, route each session's cards to its OWN forum topic in the supergroup. Default off
+  // (1:1 mode). Accepts 1/true/on.
+  telegramTopics: /^(1|true|on)$/i.test(process.env.TELEGRAM_TOPICS || ""),
   telegramEnabled: !!(process.env.TELEGRAM_BOT_TOKEN || "").trim(),
   // TEST SEAM: point this at a fake server in tests; defaults to the real Bot API.
   telegramApiBase: (process.env.TELEGRAM_API_BASE || "https://api.telegram.org").trim(),
