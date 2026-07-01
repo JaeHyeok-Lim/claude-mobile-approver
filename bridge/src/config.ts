@@ -52,6 +52,13 @@ export const config = {
   host: (process.env.HOST || "127.0.0.1").trim(),
   approvalTtlMs: int(process.env.APPROVAL_TTL_MS, 120_000),
   approvalRetainMs: int(process.env.APPROVAL_RETAIN_MS, 600_000),
+  // ---- Batch 결재 / coverage (agent-authored approvals that grant coverage) ----
+  // How long an APPROVED grant authorizes work (the execution window). Bounded, not infinite.
+  grantTtlMs: int(process.env.GRANT_TTL_MS, 1_800_000), // 30 min
+  // Hard cap on how many mutating ops one grant may authorize (server clamps the agent's request).
+  grantMaxOps: int(process.env.GRANT_MAX_OPS, 100),
+  // Default op budget when the batch request omits maxOps.
+  grantDefaultOps: int(process.env.GRANT_DEFAULT_OPS, 30),
   eventBufferMax: int(process.env.EVENT_BUFFER_MAX, 200),
   expoPushUrl: (process.env.EXPO_PUSH_URL || "https://exp.host/--/api/v2/push/send").trim(),
   // ---- Telegram remote-approval channel (OPT-IN, purely additive) ----

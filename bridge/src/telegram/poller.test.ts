@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApprovalStore } from "../store/approvalStore.js";
+import { GrantStore } from "../store/grantStore.js";
 import { EventStore } from "../store/eventStore.js";
 import { LiveHub } from "../live/liveHub.js";
 import { createTelegramChannel } from "./poller.js";
@@ -53,6 +54,7 @@ function setup(chatId = CHAT) {
   const { api, calls } = fakeApi();
   const channel = createTelegramChannel({
     approvals,
+    grants: new GrantStore({ ttlMs: 60_000, retainMs: 60_000, grantTtlMs: 600_000 }),
     events,
     live,
     api,
@@ -163,6 +165,7 @@ test("expired request -> '만료됨' branch, never flipped to allow", async () =
   const { api, calls } = fakeApi();
   const channel = createTelegramChannel({
     approvals,
+    grants: new GrantStore({ ttlMs: 60_000, retainMs: 60_000, grantTtlMs: 600_000 }),
     events,
     live,
     api,
@@ -215,6 +218,7 @@ async function renderSentCard(view: import("../contracts/index.js").ApprovalView
   const { api, calls } = fakeApi();
   const channel = createTelegramChannel({
     approvals,
+    grants: new GrantStore({ ttlMs: 60_000, retainMs: 60_000, grantTtlMs: 600_000 }),
     events,
     live,
     api,
@@ -319,6 +323,7 @@ function setupTopics(opts: { topicFails?: boolean } = {}) {
   const { api, calls } = fakeApi(opts);
   const channel = createTelegramChannel({
     approvals,
+    grants: new GrantStore({ ttlMs: 60_000, retainMs: 60_000, grantTtlMs: 600_000 }),
     events,
     live,
     api,
@@ -484,4 +489,120 @@ test("/start bootstrap logs/sends the chat_id and resolves nothing", async () =>
   await channel.handle(update);
   assert.ok(calls.sends.some((s) => s.text.includes("555")));
   assert.equal(calls.answers.length, 0);
+});
+
+// ---- Batch 결재 path (notifyBatch + ba/bd taps + reconcile + card budget) ----
+
+function setupBatch() {
+  const approvals = new ApprovalStore({ ttlMs: 60_000, retainMs: 60_000 });
+  const grants = new GrantStore({ ttlMs: 60_000, retainMs: 60_000, grantTtlMs: 600_000 });
+  const events = new EventStore({ max: 50 });
+  const live = new LiveHub({ maxClients: 10, maxPerIp: 10 });
+  const { api, calls } = fakeApi();
+  const channel = createTelegramChannel({
+    approvals,
+    grants,
+    events,
+    live,
+    api,
+    config: {
+      telegramBotToken: "t",
+      telegramChatId: CHAT, // 1:1 mode -> allowed resolver id == CHAT
+      telegramApiBase: "http://fake.invalid",
+      telegramPollTimeoutSec: 1,
+      telegramAllowedUserId: "",
+      telegramTopics: false
+    }
+  });
+  return { grants, channel, calls };
+}
+
+function seedBatch(grants: GrantStore, over: Record<string, unknown> = {}) {
+  return grants.create({
+    cwd: "C:/proj/Demo",
+    title: "demo",
+    items: ["a.ts (핵심): 리팩터 — 근거"],
+    files: ["C:/proj/Demo/a.ts"],
+    dirs: [],
+    bash: false,
+    maxOps: 3,
+    ...over
+  });
+}
+
+function batchTap(batchId: string, action: "ba" | "bd", fromId: number): TelegramUpdate {
+  return {
+    update_id: 1,
+    callback_query: {
+      id: "cbq-batch",
+      data: `${action}:${batchId}`,
+      from: { id: fromId },
+      message: { message_id: 1000, chat: { id: Number(CHAT) } }
+    }
+  };
+}
+
+test("batch: authorized 승인 tap resolves the grant and edits the card", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const v = seedBatch(grants);
+  channel.notifyBatch(v);
+  await flush();
+  assert.equal(calls.sends.length, 1, "결재 card sent");
+  await channel.handle(batchTap(v.batchId, "ba", Number(CHAT)));
+  assert.equal(grants.get(v.batchId)?.status, "allow", "grant armed");
+  assert.ok(calls.edits.some((e) => e.text.includes("승인됨")), "card edited to 승인됨");
+});
+
+test("batch: authorized 거부 tap resolves to deny", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const v = seedBatch(grants);
+  channel.notifyBatch(v);
+  await flush();
+  await channel.handle(batchTap(v.batchId, "bd", Number(CHAT)));
+  assert.equal(grants.get(v.batchId)?.status, "deny");
+  assert.ok(calls.edits.some((e) => e.text.includes("거부됨")));
+});
+
+test("batch: an unauthorized tap resolves NOTHING", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const v = seedBatch(grants);
+  channel.notifyBatch(v);
+  await flush();
+  await channel.handle(batchTap(v.batchId, "ba", 999)); // wrong from.id
+  assert.equal(grants.get(v.batchId)?.status, "pending", "untouched");
+  assert.ok(calls.answers.some((a) => a.text === "권한 없음"));
+  assert.ok(!calls.edits.some((e) => e.text.includes("승인")), "no terminal edit");
+});
+
+test("batch: a web/expiry decision is reflected on the card exactly once (reconcile)", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const v = seedBatch(grants);
+  channel.notifyBatch(v);
+  await flush();
+  // Resolve via the store directly (as the HTTP /resolve route would), NOT via a tap.
+  grants.resolve(v.batchId, "allow");
+  await channel.reconcile();
+  await channel.reconcile(); // second sweep must NOT double-edit
+  const approved = calls.edits.filter((e) => e.text.includes("승인됨"));
+  assert.equal(approved.length, 1, "edited to 승인됨 exactly once");
+});
+
+test("batch: a long items list is truncated with a 생략 note (never silently dropped)", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const many = Array.from({ length: 40 }, (_, i) => `item ${i} ` + "x".repeat(280));
+  const v = seedBatch(grants, { items: many });
+  channel.notifyBatch(v);
+  await flush();
+  const text = calls.sends[0]?.text ?? "";
+  assert.ok(text.includes("생략"), "overflow noted with 생략");
+  assert.ok(text.length <= 4096, "card stays under Telegram's limit");
+});
+
+test("batch: bash:true card spells out the blast radius", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const v = seedBatch(grants, { bash: true, maxOps: 7 });
+  channel.notifyBatch(v);
+  await flush();
+  const text = calls.sends[0]?.text ?? "";
+  assert.ok(text.includes("임의 명령 실행"), "bash blast radius warned on card");
 });

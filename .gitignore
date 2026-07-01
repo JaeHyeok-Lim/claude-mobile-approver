@@ -10,6 +10,9 @@ node_modules/
 **/.env.*
 !**/.env.example
 
+# local gate-mode toggle (machine state, not shared)
+bridge/.gate-mode
+
 # build output
 dist/
 build/

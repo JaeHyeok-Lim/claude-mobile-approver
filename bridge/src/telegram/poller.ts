@@ -16,9 +16,10 @@
 // store decides outcomes; we just translate taps and mirror the resolve route's side-effects via
 // the shared notifyResolved helper, so the two channels can't drift.
 
-import type { ApprovalView, Decision } from "../contracts/index.js";
+import type { ApprovalView, BatchView, Decision } from "../contracts/index.js";
 import type { EventStore } from "../store/eventStore.js";
 import type { ApprovalStore } from "../store/approvalStore.js";
+import type { GrantStore } from "../store/grantStore.js";
 import type { LiveHub } from "../live/liveHub.js";
 import { notifyResolved } from "../routes.js";
 import { abstractKo, koreanToolLabel, maskPath, safePartial } from "../redact.js";
@@ -26,11 +27,16 @@ import { createTelegramApi, escapeHtml, type TelegramApi, type TelegramUpdate } 
 
 export interface TelegramChannel {
   notifyApproval(view: ApprovalView): void;
+  // Push a rich batch 결재 card with [ 승인 ]/[ 거부 ] buttons. Same posture as notifyApproval:
+  // fire-and-forget, never gates. Tapping resolves through the SAME GrantStore.
+  notifyBatch(view: BatchView): void;
   start(): void;
   stop(): void;
   // Translate a single update into (at most) one store resolve. Public so tests can drive the
   // security-critical paths without spinning a real network loop.
   handle(update: TelegramUpdate): Promise<void>;
+  // Reconcile tracked cards against store state (TTL/web-resolve). Exposed for tests.
+  reconcile(): Promise<void>;
 }
 
 interface TelegramConfig {
@@ -45,6 +51,7 @@ interface TelegramConfig {
 
 export interface TelegramDeps {
   approvals: ApprovalStore;
+  grants: GrantStore;
   events: EventStore;
   live: LiveHub;
   config: TelegramConfig;
@@ -52,8 +59,14 @@ export interface TelegramDeps {
   api?: TelegramApi;
 }
 
-// Strict callback_data: action prefix + a UUID (the requestId). Anything else is dropped.
-const CALLBACK_RE = /^(a|d):([0-9a-fA-F-]{36})$/;
+// Strict callback_data: action prefix + a UUID. Approvals use a/d; batch 결재 use ba/bd. Anything
+// else is dropped. (`[0-9a-fA-F-]` character class per lint S6035.)
+const CALLBACK_RE = /^([ad]):([0-9a-fA-F-]{36})$/;
+const BATCH_CALLBACK_RE = /^(b[ad]):([0-9a-fA-F-]{36})$/;
+
+// Telegram rejects messages over ~4096 chars. Keep the rich batch card comfortably under that; if
+// the items list would overflow we truncate it and note how many were hidden (never silently drop).
+const CARD_CHAR_BUDGET = 3500;
 
 // Cap the requestId -> tracked-card map so a flood of approvals can't grow it unbounded.
 const MESSAGE_MAP_CAP = 200;
@@ -82,6 +95,19 @@ interface CardContext {
   // 1:1 mode or when sending to the General topic (no thread id).
   threadId?: number;
   // Set once we've edited the card into a terminal state, so reconcile never re-edits it.
+  edited?: boolean;
+}
+
+// Tracked 결재 card: enough to re-render the header + swap the status tag on a decision. The body
+// (title/items/scope) is rebuilt verbatim from these already-safe, agent-authored fields.
+interface BatchCardContext {
+  messageId: number;
+  title: string;
+  projectName: string;
+  shortSession: string; // "" when the batch carried no session
+  itemsBlock: string; // pre-rendered, budget-clamped, escaped items list
+  scopeLine: string; // "범위 : 파일 N · 디렉터리 M · bash 허용/불가"
+  threadId?: number;
   edited?: boolean;
 }
 
@@ -123,7 +149,7 @@ function renderCard(ctx: CardContext, statusTag: string, lastLine: string): stri
 }
 
 export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
-  const { approvals, events, live, config } = deps;
+  const { approvals, grants, events, live, config } = deps;
   const api =
     deps.api ??
     createTelegramApi({ apiBase: config.telegramApiBase, token: config.telegramBotToken });
@@ -131,6 +157,9 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
   // requestId -> the chat card we sent + the display context to re-render it, so the outcome can
   // edit that exact card (lines 1–3 verbatim, status tag + line 4 swapped).
   const messages = new Map<string, CardContext>();
+
+  // batchId -> its tracked 결재 card, so a decision (tap / web / expiry) edits that exact message.
+  const batchMessages = new Map<string, BatchCardContext>();
 
   // TOPICS MODE: sessionId -> forum threadId. Filled lazily on the first approval per session via
   // api.createForumTopic; reused for every later card/edit of that session. A failed create caches
@@ -228,7 +257,7 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     if (!config.telegramTopics) return undefined; // 1:1 mode: never thread
     const cached = sessionThreads.get(sessionId);
     if (cached !== undefined) return cached === GENERAL_TOPIC ? undefined : cached;
-    const name = `${projectName} #${shortSession}`;
+    const name = shortSession ? `${projectName} #${shortSession}` : projectName;
     const topic = await api.createForumTopic(config.telegramChatId, name);
     if (topic) {
       rememberThread(sessionId, topic.message_thread_id);
@@ -240,6 +269,96 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     );
     rememberThread(sessionId, GENERAL_TOPIC);
     return undefined;
+  }
+
+  function rememberBatch(batchId: string, ctx: BatchCardContext): void {
+    if (batchMessages.size >= MESSAGE_MAP_CAP) {
+      const oldest = batchMessages.keys().next().value;
+      if (oldest !== undefined) batchMessages.delete(oldest);
+    }
+    batchMessages.set(batchId, ctx);
+  }
+
+  // Build the numbered items block within a char budget. Never silently drops — if it can't fit
+  // everything it appends a "…(생략 K건)" note so the reader knows more work is covered.
+  function buildItemsBlock(items: string[]): string {
+    const lines: string[] = [];
+    let used = 0;
+    let shown = 0;
+    for (let i = 0; i < items.length; i++) {
+      const line = `    ${i + 1}. ${escapeHtml(items[i]!)}`;
+      if (used + line.length > CARD_CHAR_BUDGET && shown > 0) break;
+      lines.push(line);
+      used += line.length + 1;
+      shown += 1;
+    }
+    if (shown < items.length) lines.push(`    …(생략 ${items.length - shown}건)`);
+    return lines.join("\n");
+  }
+
+  function batchScopeLine(view: BatchView): string {
+    // bash:true is the widest grant — it authorizes ANY command for the window, so the card spells
+    // out the blast radius (⚠️ is the sanctioned risk-warning emoji).
+    const bash = view.bash ? `허용 ⚠️ (승인 시 최대 ${view.maxOps}회 임의 명령 실행)` : "불가";
+    return `범위 : 파일 ${view.files.length} · 디렉터리 ${view.dirs.length} · bash ${bash}`;
+  }
+
+  // Render a 결재 card. Header + body (title/session/items/scope) stay identical across states;
+  // only the leading status tag and the bottom line swap on a decision.
+  function renderBatchCard(ctx: BatchCardContext, statusTag: string, lastLine: string): string {
+    const lines = [`[${statusTag}] 결재 요청`, "", `• 제목     : <b>${escapeHtml(ctx.title)}</b>`, `• 프로젝트 : <b>${escapeHtml(ctx.projectName)}</b>`];
+    if (ctx.shortSession) lines.push(`• 세션     : <code>#${escapeHtml(ctx.shortSession)}</code>`);
+    lines.push("• 작업     :", ctx.itemsBlock, `• ${escapeHtml(ctx.scopeLine)}`, "", lastLine);
+    return lines.join("\n");
+  }
+
+  function batchExpiryLine(expiresAt: string): string {
+    const sec = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
+    if (sec >= 60) return `만료 : <b>${Math.round(sec / 60)}분</b> 내 미응답 시 자동 거부`;
+    return `만료 : <b>${sec}초</b> 내 미응답 시 자동 거부`;
+  }
+
+  function notifyBatch(view: BatchView): void {
+    const projectName = view.cwd ? projectNameOf(view.cwd) : "(작업폴더 없음)";
+    const shortSession = view.sessionId ? view.sessionId.slice(0, 8) : "";
+    const ctxBase: BatchCardContext = {
+      messageId: 0,
+      title: view.title,
+      projectName,
+      shortSession,
+      itemsBlock: buildItemsBlock(view.items),
+      scopeLine: batchScopeLine(view)
+    };
+    const text = renderBatchCard(ctxBase, "대기", batchExpiryLine(view.expiresAt));
+    const keyboard = [
+      [
+        { text: "승인", callback_data: `ba:${view.batchId}` },
+        { text: "거부", callback_data: `bd:${view.batchId}` }
+      ]
+    ];
+    void (async () => {
+      // Route to a topic keyed by session when present, else by project (cwd) — so a project's
+      // 결재 land together and different projects stay separate. Same lazy-create as approvals.
+      const threadKey = view.sessionId ? view.sessionId : `cwd:${view.cwd}`;
+      const threadId = config.telegramTopics
+        ? await resolveThread(threadKey, projectName, shortSession)
+        : undefined;
+      const sent = await api.sendMessage(config.telegramChatId, text, keyboard, threadId);
+      if (sent) rememberBatch(view.batchId, { ...ctxBase, messageId: sent.message_id, threadId });
+    })();
+  }
+
+  // Edit a tracked 결재 card into a terminal state ONCE. Best-effort; never throws.
+  async function editBatchTerminal(batchId: string, tag: string, lastLine: string): Promise<void> {
+    const ctx = batchMessages.get(batchId);
+    if (!ctx || ctx.edited) return;
+    ctx.edited = true;
+    await api.editMessageText(
+      config.telegramChatId,
+      ctx.messageId,
+      renderBatchCard(ctx, tag, lastLine),
+      ctx.threadId
+    );
   }
 
   // Edit a tracked card into one of its terminal states ONCE, then mark it edited so neither a
@@ -296,40 +415,67 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
       return; // resolve NOTHING
     }
 
-    // (c) Strict callback_data parse.
-    const m = cq.data ? CALLBACK_RE.exec(cq.data) : null;
-    if (!m) {
-      await api.answerCallbackQuery(cq.id);
+    // (c) Strict callback_data parse — an APPROVAL (a/d) or a BATCH 결재 (ba/bd) tap.
+    const data = cq.data ?? "";
+    const am = CALLBACK_RE.exec(data);
+    if (am) {
+      await handleApprovalTap(cq.id, am[1] === "a" ? "allow" : "deny", am[2]!);
       return;
     }
-    // (d) action -> decision.
-    const decision: Decision = m[1] === "a" ? "allow" : "deny";
-    const requestId = m[2]!;
+    const bm = BATCH_CALLBACK_RE.exec(data);
+    if (bm) {
+      await handleBatchTap(cq.id, bm[1] === "ba" ? "allow" : "deny", bm[2]!);
+      return;
+    }
+    await api.answerCallbackQuery(cq.id);
+  }
 
-    // (e) Resolve through the store and branch on its discriminated result. The card is re-rendered
-    // (lines 1–3 verbatim) with the new status tag + line 4 via editTerminal.
+  // Resolve an approval via its store, edit the card, ack the tap. Mirrors the HTTP resolve route.
+  async function handleApprovalTap(cqId: string, decision: Decision, requestId: string): Promise<void> {
     const result = approvals.resolve(requestId, decision);
     if (result.ok) {
       notifyResolved({ events, live }, result.view, decision);
-      if (decision === "allow") {
-        await editTerminal(requestId, "승인됨", "<b>승인됨</b>");
-        await api.answerCallbackQuery(cq.id, "승인됨");
-      } else {
-        await editTerminal(requestId, "거부됨", "<b>거부됨</b>");
-        await api.answerCallbackQuery(cq.id, "거부됨");
-      }
+      const tag = decision === "allow" ? "승인됨" : "거부됨";
+      await editTerminal(requestId, tag, `<b>${tag}</b>`);
+      await api.answerCallbackQuery(cqId, tag);
       return;
     }
-    // Failure branches mirror the HTTP resolve route's semantics.
     if (result.reason === "expired") {
       await editTerminal(requestId, "만료", "<b>만료됨</b> · 자동 거부");
-      await api.answerCallbackQuery(cq.id, "만료됨");
+      await api.answerCallbackQuery(cqId, "만료됨");
     } else if (result.reason === "already_resolved") {
       await editTerminal(requestId, "이미처리", "<b>이미 처리됨</b>");
-      await api.answerCallbackQuery(cq.id, "이미 처리됨");
+      await api.answerCallbackQuery(cqId, "이미 처리됨");
     } else {
-      // not_found — nothing tracked to edit.
-      await api.answerCallbackQuery(cq.id, "알 수 없는 요청");
+      await api.answerCallbackQuery(cqId, "알 수 없는 요청");
+    }
+  }
+
+  // Resolve a batch 결재 via the grant store, edit its card, ack the tap. On allow the grant window
+  // is armed inside GrantStore.resolve(); here we just reflect the outcome + feed the event.
+  async function handleBatchTap(cqId: string, decision: Decision, batchId: string): Promise<void> {
+    const result = grants.resolve(batchId, decision);
+    if (result.ok) {
+      const tag = decision === "allow" ? "승인됨" : "거부됨";
+      events.append({
+        kind: "Decision",
+        message: `결재 ${tag}: ${result.view.title}`,
+        severity: decision === "allow" ? "info" : "warn",
+        source: result.view.sessionId ?? result.view.cwd
+      });
+      live.broadcast({ type: "batch", batch: result.view });
+      await editBatchTerminal(batchId, tag, `<b>${tag}</b>`);
+      await api.answerCallbackQuery(cqId, tag);
+      return;
+    }
+    if (result.reason === "expired") {
+      await editBatchTerminal(batchId, "만료", "<b>만료됨</b> · 자동 거부");
+      await api.answerCallbackQuery(cqId, "만료됨");
+    } else if (result.reason === "already_resolved") {
+      await editBatchTerminal(batchId, "이미처리", "<b>이미 처리됨</b>");
+      await api.answerCallbackQuery(cqId, "이미 처리됨");
+    } else {
+      await api.answerCallbackQuery(cqId, "알 수 없는 결재");
     }
   }
 
@@ -353,6 +499,28 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
         await editTerminal(requestId, "만료", "<b>만료됨</b> · 자동 거부");
       }
       messages.delete(requestId);
+    }
+    await reconcileBatches();
+  }
+
+  // Same sweep for 결재 cards: reflect a decision made via web/tap or a TTL expiry, once. Split out
+  // to keep reconcile()'s complexity down.
+  async function reconcileBatches(): Promise<void> {
+    const TERMINAL: Record<string, readonly [string, string]> = {
+      allow: ["승인됨", "<b>승인됨</b>"],
+      deny: ["거부됨", "<b>거부됨</b>"],
+      expired: ["만료", "<b>만료됨</b> · 자동 거부"]
+    };
+    for (const [batchId, ctx] of [...batchMessages]) {
+      const view = grants.get(batchId);
+      if (ctx.edited || !view) {
+        batchMessages.delete(batchId);
+        continue;
+      }
+      const term = TERMINAL[view.status];
+      if (!term) continue; // "pending" — still awaiting a decision
+      await editBatchTerminal(batchId, term[0], term[1]);
+      batchMessages.delete(batchId);
     }
   }
 
@@ -405,7 +573,7 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     stopped = true;
   }
 
-  return { notifyApproval, start, stop, handle };
+  return { notifyApproval, notifyBatch, start, stop, handle, reconcile };
 }
 
 function sleep(ms: number): Promise<void> {

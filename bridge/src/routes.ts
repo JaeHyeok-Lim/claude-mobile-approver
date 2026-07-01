@@ -14,8 +14,13 @@
 import { Router, type Request, type Response } from "express";
 import type {
   ApprovalView,
+  BatchView,
+  CoverageRequest,
+  CoverageResponse,
   CreateApprovalRequest,
   CreateApprovalResponse,
+  CreateBatchRequest,
+  CreateBatchResponse,
   CreateEventRequest,
   Decision,
   EventKind,
@@ -24,6 +29,7 @@ import type {
   ResolveApprovalRequest
 } from "./contracts/index.js";
 import type { ApprovalStore } from "./store/approvalStore.js";
+import type { GrantStore } from "./store/grantStore.js";
 import type { EventStore } from "./store/eventStore.js";
 import type { DeviceStore } from "./store/deviceStore.js";
 import type { ExpoPush } from "./push/expoPush.js";
@@ -61,6 +67,7 @@ const SEVERITIES = new Set<EventSeverity>(["info", "warn", "error"]);
 
 export interface Deps {
   approvals: ApprovalStore;
+  grants: GrantStore;
   events: EventStore;
   devices: DeviceStore;
   push: ExpoPush;
@@ -73,9 +80,23 @@ function badRequest(res: Response, message: string): void {
   res.status(400).json({ error: "bad_request", message });
 }
 
+// Coerce an unknown into a bounded array of clamped non-empty strings. Used for batch items/files/
+// dirs so a malformed/oversized payload can never blow up memory or the Telegram card.
+function stringArray(v: unknown, maxItems: number, maxLen: number): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const el of v) {
+    if (typeof el !== "string") continue;
+    const s = clampLine(el, maxLen);
+    if (s.length > 0) out.push(s);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
 export function buildRouter(deps: Deps): Router {
   const router = Router();
-  const { approvals, events, devices, push, live, telegram } = deps;
+  const { approvals, grants, events, devices, push, live, telegram } = deps;
 
   // Liveness. Auth-gated per the spec (no exempt endpoint).
   router.get("/healthz", (_req, res) => {
@@ -168,6 +189,128 @@ export function buildRouter(deps: Deps): Router {
     // Shared side-effects (feed Decision + live broadcasts) — same path the Telegram button takes.
     notifyResolved({ events, live }, view, decision as Decision);
     res.json(view);
+  });
+
+  // ---- Batch 결재: create (agent) ----
+  // The agent submits a rich, human-authored batch. On approve it becomes an ACTIVE GRANT that the
+  // coverage route consults. NO raw tool input here — only the agent's functional summary.
+  router.post("/batches", (req: Request, res: Response) => {
+    const body = req.body as Partial<CreateBatchRequest> | undefined;
+    if (!body || typeof body.cwd !== "string" || typeof body.title !== "string") {
+      return badRequest(res, "cwd and title are required");
+    }
+    const items = stringArray(body.items, 40, 300);
+    if (items.length === 0) {
+      return badRequest(res, "items must be a non-empty array of summary lines");
+    }
+    const files = stringArray(body.files, 100, 400);
+    const dirs = stringArray(body.dirs, 40, 400);
+    const bash = body.bash === true;
+    if (files.length === 0 && dirs.length === 0 && !bash) {
+      return badRequest(res, "batch must cover at least one of: files, dirs, bash");
+    }
+    // Clamp the op budget to [1, hard cap]; default when unspecified.
+    const requested =
+      typeof body.maxOps === "number" && Number.isFinite(body.maxOps)
+        ? Math.floor(body.maxOps)
+        : config.grantDefaultOps;
+    const maxOps = Math.max(1, Math.min(requested, config.grantMaxOps));
+
+    if (grants.pendingCount() >= config.approvalMaxPending) {
+      res.status(429).json({ error: "rate_limited" });
+      return;
+    }
+
+    const view = grants.create({
+      cwd: clampLine(body.cwd, 300),
+      sessionId: typeof body.sessionId === "string" ? clampLine(body.sessionId, 80) : undefined,
+      title: clampLine(body.title, 200),
+      items,
+      files,
+      dirs,
+      bash,
+      maxOps
+    });
+
+    void push.send({
+      title: "결재 요청",
+      body: `${view.title} (${items.length}건)`,
+      data: { kind: "batch", batchId: view.batchId }
+    });
+    live.broadcast({ type: "batch", batch: view });
+    telegram?.notifyBatch(view);
+    const ev = events.append({
+      kind: "ApprovalRequest",
+      message: `결재 대기: ${view.title} (${items.length}건)`,
+      severity: "warn",
+      source: view.sessionId ?? view.cwd
+    });
+    live.broadcast({ type: "event", event: ev });
+
+    const resp: CreateBatchResponse = {
+      batchId: view.batchId,
+      status: view.status,
+      expiresAt: view.expiresAt
+    };
+    res.status(201).json(resp);
+  });
+
+  // ---- Batch 결재: list (app) ----
+  router.get("/batches", (_req, res) => {
+    res.json({ batches: grants.list() });
+  });
+
+  // ---- Batch 결재: poll one (agent) ----
+  router.get("/batches/:id", (req, res) => {
+    const view = grants.get(req.params.id);
+    if (!view) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    res.json(view);
+  });
+
+  // ---- Batch 결재: resolve (app / Telegram share the store) ----
+  router.post("/batches/:id/resolve", (req, res) => {
+    const body = req.body as Partial<ResolveApprovalRequest> | undefined;
+    const decision = body?.decision;
+    if (decision !== "allow" && decision !== "deny") {
+      return badRequest(res, 'decision must be "allow" or "deny"');
+    }
+    const result = grants.resolve(req.params.id, decision);
+    if (!result.ok) {
+      const codeMap = { not_found: 404, expired: 409, already_resolved: 409 } as const;
+      res.status(codeMap[result.reason]).json({ error: result.reason });
+      return;
+    }
+    const view = result.view;
+    const ev = events.append({
+      kind: "Decision",
+      message: `결재 ${decision === "allow" ? "승인됨" : "거부됨"}: ${view.title}`,
+      severity: decision === "allow" ? "info" : "warn",
+      source: view.sessionId ?? view.cwd
+    });
+    live.broadcast({ type: "event", event: ev });
+    live.broadcast({ type: "batch", batch: view });
+    res.json(view);
+  });
+
+  // ---- Coverage check (hook) ----
+  // The PreToolUse hook asks whether a mutating call is covered by an active grant. Covered =>
+  // atomically consume one op. Not covered / ambiguous => the hook default-denies.
+  router.post("/coverage", (req: Request, res: Response) => {
+    const body = req.body as Partial<CoverageRequest> | undefined;
+    if (!body || typeof body.cwd !== "string" || typeof body.tool !== "string") {
+      return badRequest(res, "cwd and tool are required");
+    }
+    const result = grants.cover({
+      cwd: body.cwd,
+      sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+      tool: body.tool,
+      path: typeof body.path === "string" ? body.path : undefined
+    });
+    const resp: CoverageResponse = result;
+    res.json(resp);
   });
 
   // ---- Events: list (app) ----

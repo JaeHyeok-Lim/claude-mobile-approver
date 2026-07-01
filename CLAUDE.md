@@ -50,9 +50,18 @@ pwsh scripts/install-autostart.ps1
 node scripts/install-hooks-global.mjs           # dry-run first — always
 node scripts/install-hooks-global.mjs --apply   # write after reviewing
 
+# gate mode toggle (off = native prompt · on = batch 결재 · each = legacy per-call)
+node scripts/gate.mjs status
+node scripts/gate.mjs off | on | each
+
+# submit a batch 결재 (agent workflow in batch mode) — see docs/batch-approval.md
+node scripts/submit-batch.mjs --spec <spec.json>
+
 # validate settings JSON
 python -m json.tool .claude/settings.json
 ```
+
+Gate modes + the batch 결재 flow are documented in [docs/batch-approval.md](docs/batch-approval.md).
 
 ## Conventions
 
