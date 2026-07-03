@@ -50,6 +50,7 @@ const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Read"
 interface StoredGrant {
   batchId: string;
   cwd: string; // normalized
+  project: string; // display name ("" -> card falls back to cwd basename)
   sessionId: string; // "" if none
   title: string;
   items: string[];
@@ -67,6 +68,7 @@ interface StoredGrant {
 
 export interface CreateGrantInput {
   cwd: string;
+  project?: string;
   sessionId?: string;
   title: string;
   items: string[];
@@ -107,6 +109,7 @@ export class GrantStore {
     const rec: StoredGrant = {
       batchId: randomUUID(),
       cwd: normPath(input.cwd),
+      project: input.project ?? "",
       sessionId: input.sessionId ?? "",
       title: input.title,
       items: input.items,
@@ -266,6 +269,7 @@ export class GrantStore {
       // While active, expose the grant (execution) window; otherwise the pending-decision window.
       expiresAt: new Date(active ? rec.grantExpiresAt! : rec.expiresAt).toISOString()
     };
+    if (rec.project !== "") view.project = rec.project;
     if (rec.sessionId !== "") view.sessionId = rec.sessionId;
     if (rec.resolvedAt !== undefined) view.resolvedAt = new Date(rec.resolvedAt).toISOString();
     return view;

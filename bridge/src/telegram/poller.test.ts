@@ -606,3 +606,22 @@ test("batch: bash:true card spells out the blast radius", async () => {
   const text = calls.sends[0]?.text ?? "";
   assert.ok(text.includes("임의 명령 실행"), "bash blast radius warned on card");
 });
+
+test("batch: card leads with the functional 목적 line and uses the explicit project name", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const v = seedBatch(grants, {
+    project: "claude-mobile-approver",
+    cwd: "C:/Users/jaehyeok", // basename would wrongly be "jaehyeok"
+    title: "auth.ts 상수시간 비교로 타이밍 누출 차단"
+  });
+  channel.notifyBatch(v);
+  await flush();
+  const text = calls.sends[0]?.text ?? "";
+  // 목적 appears before 프로젝트, and carries the functional one-liner.
+  const posPurpose = text.indexOf("■ 목적");
+  const posProject = text.indexOf("프로젝트");
+  assert.ok(posPurpose !== -1 && posPurpose < posProject, "목적 leads the card");
+  assert.ok(text.includes("타이밍 누출 차단"), "목적 carries the functional summary");
+  assert.ok(text.includes("claude-mobile-approver"), "explicit project name used");
+  assert.ok(!text.includes("jaehyeok"), "cwd-basename fallback NOT used when project is set");
+});

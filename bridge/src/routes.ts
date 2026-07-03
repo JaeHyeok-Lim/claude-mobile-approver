@@ -223,6 +223,7 @@ export function buildRouter(deps: Deps): Router {
 
     const view = grants.create({
       cwd: clampLine(body.cwd, 300),
+      project: typeof body.project === "string" ? clampLine(body.project, 80) : undefined,
       sessionId: typeof body.sessionId === "string" ? clampLine(body.sessionId, 80) : undefined,
       title: clampLine(body.title, 200),
       items,
