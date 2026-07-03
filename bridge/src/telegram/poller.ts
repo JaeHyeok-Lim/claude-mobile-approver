@@ -306,7 +306,15 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
   // Render a 결재 card. Header + body (title/session/items/scope) stay identical across states;
   // only the leading status tag and the bottom line swap on a decision.
   function renderBatchCard(ctx: BatchCardContext, statusTag: string, lastLine: string): string {
-    const lines = [`[${statusTag}] 결재 요청`, "", `• 제목     : <b>${escapeHtml(ctx.title)}</b>`, `• 프로젝트 : <b>${escapeHtml(ctx.projectName)}</b>`];
+    // The functional one-liner ("무슨 파일로 무슨 작업 → 무슨 기능") leads the card — it's the first
+    // thing the user reads and must always be present.
+    const lines = [
+      `[${statusTag}] 결재 요청`,
+      "",
+      `■ 목적 : <b>${escapeHtml(ctx.title)}</b>`,
+      "",
+      `• 프로젝트 : <b>${escapeHtml(ctx.projectName)}</b>`
+    ];
     if (ctx.shortSession) lines.push(`• 세션     : <code>#${escapeHtml(ctx.shortSession)}</code>`);
     lines.push("• 작업     :", ctx.itemsBlock, `• ${escapeHtml(ctx.scopeLine)}`, "", lastLine);
     return lines.join("\n");
@@ -319,7 +327,9 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
   }
 
   function notifyBatch(view: BatchView): void {
-    const projectName = view.cwd ? projectNameOf(view.cwd) : "(작업폴더 없음)";
+    // Prefer the agent's EXPLICIT project name; only fall back to the cwd basename (which is wrong
+    // when a session runs from a home/parent dir).
+    const projectName = view.project || (view.cwd ? projectNameOf(view.cwd) : "(작업폴더 없음)");
     const shortSession = view.sessionId ? view.sessionId.slice(0, 8) : "";
     const ctxBase: BatchCardContext = {
       messageId: 0,

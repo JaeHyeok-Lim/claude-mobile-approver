@@ -14,11 +14,12 @@
 // Spec JSON (secrets NEVER go here — only a functional summary):
 //   {
 //     "cwd": "C:/Users/.../project",       // defaults to process.cwd()
+//     "project": "claude-mobile-approver",  // display name (set explicitly; don't rely on cwd)
 //     "sessionId": "…",                     // optional; tightens coverage to one session
-//     "title": "인증 흐름 리팩터",
+//     "title": "로그인 실패 429 처리로 브루트포스 방어",  // REQUIRED functional one-liner -> shown as "■ 목적"
 //     "items": [
-//       "auth.ts (토큰 검증): 상수시간 비교로 교체 — 타이밍 누출 차단이 근거",
-//       "routes.ts (로그인 라우트): 실패시 429 반환 — 브루트포스 방어 결정"
+//       "auth.ts — 토큰 검증을 상수시간 비교로 교체 → 타이밍 누출 차단",
+//       "routes.ts — 로그인 실패 시 429 반환 → 브루트포스 방어"
 //     ],
 //     "files": ["C:/…/src/auth.ts", "C:/…/src/routes.ts"],
 //     "dirs":  ["C:/…/src/telegram"],       // optional dir prefixes
@@ -70,6 +71,7 @@ try {
 
 const body = {
   cwd: typeof spec.cwd === "string" && spec.cwd ? spec.cwd : process.cwd(),
+  project: typeof spec.project === "string" && spec.project.trim() ? spec.project.trim() : undefined,
   // Treat an empty/blank sessionId as absent so it doesn't look like a session-scoped grant.
   sessionId: typeof spec.sessionId === "string" && spec.sessionId.trim() ? spec.sessionId.trim() : undefined,
   title: spec.title,

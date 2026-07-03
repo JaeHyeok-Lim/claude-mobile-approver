@@ -48,12 +48,13 @@ Exit code is `0` only when **approved**, so a caller can gate on it.
 ```json
 {
   "cwd": "C:/Users/you/projects/foo",
+  "project": "foo",
   "sessionId": "optional-session-id",
-  "title": "인증 흐름 하드닝",
+  "title": "로그인 하드닝: 실패 429 + 상수시간 토큰검증으로 브루트포스/타이밍 방어",
   "items": [
-    "auth.ts (토큰 검증): 상수시간 비교로 교체 — 타이밍 누출 차단이 근거",
-    "routes.ts (로그인): 실패 시 429 — 브루트포스 방어 결정",
-    "config.ts: RATE_MAX 기본값 120 유지 — 기존 부하와 호환"
+    "auth.ts — 토큰 검증을 상수시간 비교로 교체 → 타이밍 누출 차단",
+    "routes.ts — 로그인 실패 시 429 반환 → 브루트포스 방어",
+    "config.ts — RATE_MAX 기본값 120 유지 → 기존 부하와 호환"
   ],
   "files": ["C:/.../src/auth.ts", "C:/.../src/routes.ts", "C:/.../src/config.ts"],
   "dirs":  ["C:/.../src/telegram"],
@@ -62,7 +63,12 @@ Exit code is `0` only when **approved**, so a caller can gate on it.
 }
 ```
 
-- `items` — one line each: **어떤 기능의 어떤 파일을 · 어떻게 수정 · 어떤 결정 · 근거**. Nothing omitted
+- `title` — **REQUIRED functional one-liner**, rendered at the very top of the card as **■ 목적**:
+  *무슨 파일로 무슨 작업을 해서 무슨 기능을 하는지* in the user's terms. This is the first thing the
+  approver reads.
+- `project` — display name shown on the card. **Set it explicitly** — don't rely on the cwd
+  basename (a session run from a home/parent dir would otherwise show e.g. `jaehyeok`).
+- `items` — one line each: **어떤 파일을 — 무슨 작업 → 어떤 기능/근거**. Nothing omitted
   (functionally); the card can be long. Rendered verbatim (HTML-escaped).
 - `files` — exact absolute paths the batch may touch (Edit/Write/MultiEdit/NotebookEdit).
 - `dirs` — directory prefixes; any file under one is covered.

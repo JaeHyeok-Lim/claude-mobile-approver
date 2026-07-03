@@ -161,11 +161,18 @@ export interface CreateBatchRequest {
   // Project path this batch is scoped to. Coverage binds to this cwd (the agent always knows it),
   // so a grant authorizes work only for the originating project.
   cwd: string;
+  // Human-readable project name for the card. The agent sets it EXPLICITLY (don't guess from the
+  // cwd basename — a session run from a home dir would show the wrong name). Optional; falls back
+  // to the cwd's last segment.
+  project?: string;
   // Optional session label — used for display + topic routing, and (when both sides set it)
   // tightens coverage to that session. Omit and coverage falls back to cwd-only binding.
   sessionId?: string;
-  title: string; // one-line headline shown at the top of the card
-  // Rich human one-liners: each describes 파일·기능·수정방식·결정·근거. Rendered verbatim (escaped).
+  // REQUIRED functional one-liner shown at the very TOP of the card as "■ 목적": what this work does
+  // functionally, in the user's terms (e.g. "로그인 실패 429 처리로 브루트포스 방어"). Not a file list.
+  title: string;
+  // Rich human one-liners, one per operation: 어떤 파일을 — 무슨 작업 → 어떤 기능/근거.
+  // Rendered verbatim (escaped).
   items: string[];
   files?: string[]; // absolute file paths covered (Edit/Write/MultiEdit/NotebookEdit)
   dirs?: string[]; // directory prefixes covered (a call under one of these is covered)
@@ -183,6 +190,7 @@ export interface BatchView {
   batchId: string;
   status: GrantStatus;
   cwd: string;
+  project?: string;
   sessionId?: string;
   title: string;
   items: string[];
