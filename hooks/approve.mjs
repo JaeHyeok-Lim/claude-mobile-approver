@@ -57,12 +57,29 @@ function int(v, d) {
   return Number.isFinite(n) && n > 0 ? n : d;
 }
 
+// Gate mode, read from <repo>/bridge/.gate-mode on every call (so `scripts/gate.mjs` toggles take
+// effect for the NEXT tool call, even mid-session). Values:
+//   "off"   -> emit "ask"; Claude Code uses its NATIVE in-session permission flow (no remote gate).
+//   "batch" -> coverage mode: allow ONLY calls covered by an approved batch 결재; else deny.
+//   "each"  -> legacy per-call remote approval card (create + long-poll). DEFAULT (non-breaking).
+// Missing/unknown file -> "each", preserving the original behavior until the user opts in.
+function gateMode() {
+  try {
+    const p = join(dirname(fileURLToPath(import.meta.url)), '..', 'bridge', '.gate-mode');
+    const v = readFileSync(p, 'utf8').trim().toLowerCase();
+    if (v === 'off' || v === 'batch' || v === 'each') return v;
+  } catch {
+    /* no/unreadable file -> default */
+  }
+  return 'each';
+}
+
 // Emit a PreToolUse decision and exit. exit code 0: Claude Code reads stdout JSON.
 function decide(decision, reason) {
   const out = {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
-      permissionDecision: decision, // "allow" | "deny"
+      permissionDecision: decision, // "allow" | "deny" | "ask"
       permissionDecisionReason: reason,
     },
   };
@@ -76,6 +93,8 @@ function decide(decision, reason) {
 
 const deny = (reason) => decide('deny', `[agent-mobile-bridge] ${reason}`);
 const allow = (reason) => decide('allow', `[agent-mobile-bridge] ${reason}`);
+// "ask" hands the decision back to Claude Code's native permission flow (used in gate mode "off").
+const defer = (reason) => decide('ask', `[agent-mobile-bridge] ${reason}`);
 
 function readStdin() {
   try {
@@ -199,9 +218,50 @@ async function main() {
     return deny('unparsable hook payload');
   }
 
+  // Gate mode decides the whole strategy. "off" is checked FIRST so a token-less machine can still
+  // fall back to the native prompt instead of hard-denying.
+  const mode = gateMode();
+  if (mode === 'off') return defer('gate off — 세션 승인창 사용');
+
   // No token configured -> we cannot authenticate the gate -> default-deny.
   if (!TOKEN) return deny('BRIDGE_TOKEN not configured');
 
+  if (mode === 'batch') return coverageDecision(input);
+  return eachDecision(input); // legacy per-call remote approval
+}
+
+// BATCH mode: allow ONLY when an approved batch 결재 covers this call. Any miss / bridge error ->
+// default-deny (fail closed). No per-call card is created — the 결재 is the approval surface.
+async function coverageDecision(input) {
+  const ti = input.tool_input || {};
+  const path =
+    typeof ti.file_path === 'string'
+      ? ti.file_path
+      : typeof ti.notebook_path === 'string'
+        ? ti.notebook_path
+        : undefined;
+  const body = {
+    cwd: input.cwd || process.cwd(),
+    sessionId: input.session_id || undefined,
+    tool: input.tool_name || 'unknown',
+    path,
+  };
+  let res;
+  try {
+    res = await fetchJson('/v1/coverage', { method: 'POST', body: JSON.stringify(body) });
+  } catch {
+    return deny('bridge unreachable on coverage check');
+  }
+  if (res.ok && res.body && res.body.covered === true) {
+    const left = res.body.remainingOps ?? '?';
+    return allow(`결재 승인 범위 내 (남은 작업 ${left})`);
+  }
+  // Not covered -> block, and tell the operator/agent how to authorize it.
+  return deny('승인된 결재가 이 작업을 포함하지 않음 — scripts/submit-batch.mjs 로 결재 요청 필요');
+}
+
+// EACH mode (legacy): create one pending approval and bounded long-poll for a remote decision.
+async function eachDecision(input) {
   const payload = {
     sessionId: input.session_id || 'local',
     tool: input.tool_name || 'unknown',

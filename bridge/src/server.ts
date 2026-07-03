@@ -15,6 +15,7 @@ import { makeRequireAuth } from "./auth.js";
 import { RateLimiter } from "./rateLimit.js";
 import { buildRouter } from "./routes.js";
 import { ApprovalStore } from "./store/approvalStore.js";
+import { GrantStore } from "./store/grantStore.js";
 import { EventStore } from "./store/eventStore.js";
 import { DeviceStore } from "./store/deviceStore.js";
 import { ExpoPush } from "./push/expoPush.js";
@@ -25,6 +26,11 @@ export function createApp() {
   const approvals = new ApprovalStore({
     ttlMs: config.approvalTtlMs,
     retainMs: config.approvalRetainMs
+  });
+  const grants = new GrantStore({
+    ttlMs: config.approvalTtlMs,
+    retainMs: config.approvalRetainMs,
+    grantTtlMs: config.grantTtlMs
   });
   const events = new EventStore({ max: config.eventBufferMax });
   const devices = new DeviceStore({ max: config.deviceMax });
@@ -39,11 +45,14 @@ export function createApp() {
   // additive: it resolves through the same store and never gates. The poll loop is NOT started
   // here so createApp() in tests spawns no network loop; only the isMain block below starts it.
   const telegram = config.telegramEnabled
-    ? createTelegramChannel({ approvals, events, live, config })
+    ? createTelegramChannel({ approvals, grants, events, live, config })
     : null;
 
-  // Periodically drop stale terminal/expired approvals.
-  const sweepTimer = setInterval(() => approvals.sweep(), 30_000);
+  // Periodically drop stale terminal/expired approvals + grants.
+  const sweepTimer = setInterval(() => {
+    approvals.sweep();
+    grants.sweep();
+  }, 30_000);
   sweepTimer.unref?.();
 
   const app = express();
@@ -62,7 +71,7 @@ export function createApp() {
     "/v1",
     limiter.middleware({ max: config.rateMax, sensitiveMax: config.rateSensitiveMax }),
     makeRequireAuth(limiter),
-    buildRouter({ approvals, events, devices, push, live, telegram })
+    buildRouter({ approvals, grants, events, devices, push, live, telegram })
   );
 
   // Mobile web approval page (PUBLIC — outside /v1, NOT behind requireAuth). The HTML/JS carry no

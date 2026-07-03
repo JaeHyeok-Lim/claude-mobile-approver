@@ -142,4 +142,79 @@ export interface RegisterDeviceResponse {
 export type LiveFrame =
   | { type: "event"; event: EventView }
   | { type: "approval"; approval: ApprovalView }
+  | { type: "batch"; batch: BatchView }
   | { type: "ping"; at: string };
+
+// ---- Batch 결재 (agent-authored, rich, coverage-granting) --------------------
+// The AGENT submits a rich, human-authored batch approval describing planned work. On approve it
+// becomes an ACTIVE GRANT that covers subsequent mutating tool calls (matched by cwd + file scope)
+// so the PreToolUse hook lets them through SILENTLY (no per-call card). This is the ONLY way work
+// is authorized in "batch" gate mode — an uncovered mutating call is denied.
+//
+// SECURITY: like approvals, this carries NO secrets. The agent writes a FUNCTIONAL summary
+// (파일·기능·수정방식·결정·근거); raw command bodies, file contents, and tokens are never included.
+// Same terminal-state / expiry-beats-allow discipline as ApprovalStore.
+export type GrantStatus = ApprovalStatus; // "pending" | "allow" | "deny" | "expired"
+
+// ---- POST /v1/batches (agent -> bridge) ------------------------------------
+export interface CreateBatchRequest {
+  // Project path this batch is scoped to. Coverage binds to this cwd (the agent always knows it),
+  // so a grant authorizes work only for the originating project.
+  cwd: string;
+  // Optional session label — used for display + topic routing, and (when both sides set it)
+  // tightens coverage to that session. Omit and coverage falls back to cwd-only binding.
+  sessionId?: string;
+  title: string; // one-line headline shown at the top of the card
+  // Rich human one-liners: each describes 파일·기능·수정방식·결정·근거. Rendered verbatim (escaped).
+  items: string[];
+  files?: string[]; // absolute file paths covered (Edit/Write/MultiEdit/NotebookEdit)
+  dirs?: string[]; // directory prefixes covered (a call under one of these is covered)
+  bash?: boolean; // whether Bash tool calls are covered by this batch
+  maxOps?: number; // max mutating ops this grant authorizes (server clamps to a hard cap)
+}
+
+export interface CreateBatchResponse {
+  batchId: string;
+  status: GrantStatus; // "pending" on success
+  expiresAt: string; // pending-decision TTL (ISO-8601 UTC)
+}
+
+export interface BatchView {
+  batchId: string;
+  status: GrantStatus;
+  cwd: string;
+  sessionId?: string;
+  title: string;
+  items: string[];
+  files: string[];
+  dirs: string[];
+  bash: boolean;
+  maxOps: number;
+  remainingOps: number;
+  createdAt: string; // ISO-8601 UTC
+  // Pending-decision expiry while "pending"; the GRANT expiry once "allow" (agent has this long +
+  // remainingOps to execute the batch). ISO-8601 UTC.
+  expiresAt: string;
+  resolvedAt?: string; // ISO-8601 UTC, set on allow/deny
+}
+
+export interface ListBatchesResponse {
+  batches: BatchView[];
+}
+
+// ---- POST /v1/coverage (hook -> bridge) ------------------------------------
+// The PreToolUse hook asks whether a pending mutating call is covered by an ACTIVE grant. When
+// covered the bridge ATOMICALLY consumes one op and returns covered:true; the hook then allows the
+// call silently. Not covered (or any ambiguity) -> covered:false -> the hook default-denies.
+export interface CoverageRequest {
+  cwd: string;
+  sessionId?: string;
+  tool: string;
+  path?: string; // file_path / notebook_path for file tools; omitted for Bash
+}
+export interface CoverageResponse {
+  covered: boolean;
+  batchId?: string;
+  remainingOps?: number;
+  reason?: string; // short human reason when not covered
+}
