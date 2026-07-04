@@ -117,6 +117,55 @@ function projectNameOf(cwd: string): string {
   return parts.at(-1) ?? "(작업폴더 없음)";
 }
 
+// ---- 결재 card rendering (pure; module scope so they aren't rebuilt per channel/call) ----
+
+// Build the numbered items block within a char budget. Never silently drops — if it can't fit
+// everything it appends a "…(생략 K건)" note so the reader knows more work is covered.
+function buildItemsBlock(items: string[]): string {
+  const lines: string[] = [];
+  let used = 0;
+  let shown = 0;
+  for (let i = 0; i < items.length; i++) {
+    const line = `    ${i + 1}. ${escapeHtml(items[i]!)}`;
+    if (used + line.length > CARD_CHAR_BUDGET && shown > 0) break;
+    lines.push(line);
+    used += line.length + 1;
+    shown += 1;
+  }
+  if (shown < items.length) lines.push(`    …(생략 ${items.length - shown}건)`);
+  return lines.join("\n");
+}
+
+function batchScopeLine(view: BatchView): string {
+  // bash:true is the widest grant — it authorizes ANY command for the window, so the card spells
+  // out the blast radius (⚠️ is the sanctioned risk-warning emoji).
+  const bash = view.bash ? `허용 ⚠️ (승인 시 최대 ${view.maxOps}회 임의 명령 실행)` : "불가";
+  return `범위 : 파일 ${view.files.length} · 디렉터리 ${view.dirs.length} · bash ${bash}`;
+}
+
+// Render a 결재 card. Header + body (title/session/items/scope) stay identical across states;
+// only the leading status tag and the bottom line swap on a decision.
+function renderBatchCard(ctx: BatchCardContext, statusTag: string, lastLine: string): string {
+  // The functional one-liner ("무슨 파일로 무슨 작업 → 무슨 기능") leads the card — it's the first
+  // thing the user reads and must always be present.
+  const lines = [
+    `[${statusTag}] 결재 요청`,
+    "",
+    `■ 목적 : <b>${escapeHtml(ctx.title)}</b>`,
+    "",
+    `• 프로젝트 : <b>${escapeHtml(ctx.projectName)}</b>`
+  ];
+  if (ctx.shortSession) lines.push(`• 세션     : <code>#${escapeHtml(ctx.shortSession)}</code>`);
+  lines.push("• 작업     :", ctx.itemsBlock, `• ${escapeHtml(ctx.scopeLine)}`, "", lastLine);
+  return lines.join("\n");
+}
+
+function batchExpiryLine(expiresAt: string): string {
+  const sec = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
+  if (sec >= 60) return `만료 : <b>${Math.round(sec / 60)}분</b> 내 미응답 시 자동 거부`;
+  return `만료 : <b>${sec}초</b> 내 미응답 시 자동 거부`;
+}
+
 // "  ⚠️" ONLY for mutating tools (the one sanctioned emoji); plain "" otherwise.
 function riskMarkFor(tool: string): string {
   return RISKY_TOOLS.has(tool) ? "  ⚠️" : "";
@@ -277,53 +326,6 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
       if (oldest !== undefined) batchMessages.delete(oldest);
     }
     batchMessages.set(batchId, ctx);
-  }
-
-  // Build the numbered items block within a char budget. Never silently drops — if it can't fit
-  // everything it appends a "…(생략 K건)" note so the reader knows more work is covered.
-  function buildItemsBlock(items: string[]): string {
-    const lines: string[] = [];
-    let used = 0;
-    let shown = 0;
-    for (let i = 0; i < items.length; i++) {
-      const line = `    ${i + 1}. ${escapeHtml(items[i]!)}`;
-      if (used + line.length > CARD_CHAR_BUDGET && shown > 0) break;
-      lines.push(line);
-      used += line.length + 1;
-      shown += 1;
-    }
-    if (shown < items.length) lines.push(`    …(생략 ${items.length - shown}건)`);
-    return lines.join("\n");
-  }
-
-  function batchScopeLine(view: BatchView): string {
-    // bash:true is the widest grant — it authorizes ANY command for the window, so the card spells
-    // out the blast radius (⚠️ is the sanctioned risk-warning emoji).
-    const bash = view.bash ? `허용 ⚠️ (승인 시 최대 ${view.maxOps}회 임의 명령 실행)` : "불가";
-    return `범위 : 파일 ${view.files.length} · 디렉터리 ${view.dirs.length} · bash ${bash}`;
-  }
-
-  // Render a 결재 card. Header + body (title/session/items/scope) stay identical across states;
-  // only the leading status tag and the bottom line swap on a decision.
-  function renderBatchCard(ctx: BatchCardContext, statusTag: string, lastLine: string): string {
-    // The functional one-liner ("무슨 파일로 무슨 작업 → 무슨 기능") leads the card — it's the first
-    // thing the user reads and must always be present.
-    const lines = [
-      `[${statusTag}] 결재 요청`,
-      "",
-      `■ 목적 : <b>${escapeHtml(ctx.title)}</b>`,
-      "",
-      `• 프로젝트 : <b>${escapeHtml(ctx.projectName)}</b>`
-    ];
-    if (ctx.shortSession) lines.push(`• 세션     : <code>#${escapeHtml(ctx.shortSession)}</code>`);
-    lines.push("• 작업     :", ctx.itemsBlock, `• ${escapeHtml(ctx.scopeLine)}`, "", lastLine);
-    return lines.join("\n");
-  }
-
-  function batchExpiryLine(expiresAt: string): string {
-    const sec = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
-    if (sec >= 60) return `만료 : <b>${Math.round(sec / 60)}분</b> 내 미응답 시 자동 거부`;
-    return `만료 : <b>${sec}초</b> 내 미응답 시 자동 거부`;
   }
 
   function notifyBatch(view: BatchView): void {
