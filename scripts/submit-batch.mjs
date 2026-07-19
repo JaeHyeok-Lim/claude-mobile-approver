@@ -23,7 +23,7 @@
 //     ],
 //     "files": ["C:/…/src/auth.ts", "C:/…/src/routes.ts"],
 //     "dirs":  ["C:/…/src/telegram"],       // optional dir prefixes
-//     "bash":  true,                          // whether bash is covered
+//     "bashAllow": ["git push","npm install"], // allowed Bash command prefixes (empty = no bash)
 //     "maxOps": 20                            // op budget (server clamps)
 //   }
 
@@ -69,16 +69,34 @@ try {
   process.exit(1);
 }
 
+// Coverage is SESSION-bound, so the batch must carry the SAME session id the PreToolUse gate
+// reports. Prefer the explicit spec/--session; else CLAUDE_SESSION_ID injected by the SessionStart
+// hook (hooks/session-env.mjs). Error loudly if neither — a mis-bound grant would never match.
+const sessionId = (
+  (typeof spec.sessionId === "string" && spec.sessionId.trim()) ||
+  arg("--session") ||
+  process.env.CLAUDE_SESSION_ID ||
+  ""
+).trim();
+if (!sessionId) {
+  log(
+    "submit-batch",
+    "session id 없음 — SessionStart 훅(hooks/session-env.mjs) 미설치이거나, --session <id> 필요. " +
+      "이게 없으면 승인돼도 커버리지가 매칭되지 않습니다."
+  );
+  process.exit(1);
+}
+
 const body = {
   cwd: typeof spec.cwd === "string" && spec.cwd ? spec.cwd : process.cwd(),
   project: typeof spec.project === "string" && spec.project.trim() ? spec.project.trim() : undefined,
-  // Treat an empty/blank sessionId as absent so it doesn't look like a session-scoped grant.
-  sessionId: typeof spec.sessionId === "string" && spec.sessionId.trim() ? spec.sessionId.trim() : undefined,
+  sessionId,
   title: spec.title,
   items: spec.items,
   files: Array.isArray(spec.files) ? spec.files : [],
   dirs: Array.isArray(spec.dirs) ? spec.dirs : [],
-  bash: spec.bash === true,
+  // Allowed Bash command prefixes for this batch (e.g. ["git push","npm install"]). Empty = no bash.
+  bashAllow: Array.isArray(spec.bashAllow) ? spec.bashAllow.filter((x) => typeof x === "string") : [],
   maxOps: typeof spec.maxOps === "number" ? spec.maxOps : undefined
 };
 
@@ -104,7 +122,7 @@ if (noWait) process.exit(0);
 
 // Poll until the batch leaves "pending" or the decision window closes. A transient poll error is
 // tolerated (keep trying until the deadline), matching the hook's default-deny-on-timeout posture.
-const deadline = Date.now() + 15 * 60 * 1000; // safety cap well past the pending TTL
+const deadline = Date.now() + 31 * 60 * 1000; // just past the 30-min pending TTL (catches expiry)
 let status = "pending";
 while (Date.now() < deadline) {
   await sleep(2000);

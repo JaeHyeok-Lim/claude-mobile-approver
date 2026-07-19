@@ -32,10 +32,14 @@ function stampArg() {
 const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
 const APPROVE = join(REPO_ROOT, "hooks", "approve.mjs");
 const NOTIFY = join(REPO_ROOT, "hooks", "notify.mjs");
+const SESSION_ENV = join(REPO_ROOT, "hooks", "session-env.mjs");
 
 // Same identity rule as the installer: ours iff the command invokes one of our hook files.
 function isOurCommand(cmd) {
-  return typeof cmd === "string" && (cmd.includes(APPROVE) || cmd.includes(NOTIFY));
+  return (
+    typeof cmd === "string" &&
+    (cmd.includes(APPROVE) || cmd.includes(NOTIFY) || cmd.includes(SESSION_ENV))
+  );
 }
 
 function readSettings() {

@@ -50,8 +50,10 @@ export const config = {
   token,
   port: int(process.env.PORT, 4318),
   host: (process.env.HOST || "127.0.0.1").trim(),
-  approvalTtlMs: int(process.env.APPROVAL_TTL_MS, 120_000),
-  approvalRetainMs: int(process.env.APPROVAL_RETAIN_MS, 600_000),
+  // Pending-decision window: how long a card/결재 waits for a human tap before auto-deny. 30 min
+  // so a rich batch reviewed from a phone is realistic. Hook + submit-batch poll budgets track this.
+  approvalTtlMs: int(process.env.APPROVAL_TTL_MS, 1_800_000),
+  approvalRetainMs: int(process.env.APPROVAL_RETAIN_MS, 900_000),
   // ---- Batch 결재 / coverage (agent-authored approvals that grant coverage) ----
   // How long an APPROVED grant authorizes work (the execution window). Bounded, not infinite.
   grantTtlMs: int(process.env.GRANT_TTL_MS, 1_800_000), // 30 min

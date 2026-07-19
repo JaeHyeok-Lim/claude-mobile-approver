@@ -2,14 +2,15 @@
 // Install the approval + reporting hooks GLOBALLY, into ~/.claude/settings.json.
 //
 // What this wires up (for EVERY Claude Code session on this machine):
-//   PreToolUse  Bash|Edit|Write|MultiEdit|NotebookEdit -> hooks/approve.mjs  (remote approval gate)
+//   SessionStart                                        -> hooks/session-env.mjs (CLAUDE_SESSION_ID)
+//   PreToolUse  Bash|Edit|Write|MultiEdit|NotebookEdit -> hooks/approve.mjs  (risk-tiered gate)
 //   Notification                                        -> hooks/notify.mjs Notification
 //   PostToolUse                                         -> hooks/notify.mjs PostToolUse
 //   SubagentStop                                        -> hooks/notify.mjs SubagentStop
 //
-// The approval gate is fail-CLOSED (default-deny). Once installed it gates Bash/Edit/Write/… in
-// ALL sessions — each mutating tool call waits for a Telegram approval. That is a deliberate,
-// global change, so this script is SAFE-BY-DEFAULT:
+// The gate is fail-CLOSED but OFF by default (native prompts) until `gate.mjs on` (batch mode). In
+// batch mode SAFE work runs autonomously; only RISKY work needs an approved 결재. Installing is a
+// deliberate global change, so this script is SAFE-BY-DEFAULT:
 //   - DRY-RUN by default: prints exactly what it WOULD add/change. Writes nothing without --apply.
 //   - --apply: backs up settings.json first, merges (preserving existing keys/hooks), re-validates.
 //   - Idempotent: matches our entries by the absolute command path, so re-running never duplicates.
@@ -40,6 +41,7 @@ const SETTINGS_PATH = join(SETTINGS_DIR, "settings.json");
 const NODE = process.execPath;
 const APPROVE = join(REPO_ROOT, "hooks", "approve.mjs");
 const NOTIFY = join(REPO_ROOT, "hooks", "notify.mjs");
+const SESSION_ENV = join(REPO_ROOT, "hooks", "session-env.mjs");
 
 const BRIDGE_URL = "http://127.0.0.1:4318";
 // Read the token ONLY to sanity-check it exists — we do NOT write it into settings.json. The hook
@@ -50,12 +52,15 @@ const bridgeToken = (parseDotEnv(join(BRIDGE_DIR, ".env")).BRIDGE_TOKEN || "").t
 // Commands we manage. quoting the absolute path keeps spaces (e.g. "C:\Users\…") safe.
 const cmdApprove = `"${NODE}" "${APPROVE}"`;
 const cmdNotify = (kind) => `"${NODE}" "${NOTIFY}" ${kind}`;
+const cmdSessionEnv = `"${NODE}" "${SESSION_ENV}"`;
 // Only a non-secret hint goes into settings.json; the token is read from bridge/.env by the hook.
 const hookEnv = { BRIDGE_URL };
 
-// The four hook entries this installer owns. Shape matches Claude Code's settings schema:
+// The hook entries this installer owns. Shape matches Claude Code's settings schema:
 //   hooks.<Event> = [ { matcher?, hooks: [ { type:"command", command, env } ] } ]
+// SessionStart injects CLAUDE_SESSION_ID (so submit-batch can bind a 결재 to this session).
 const MANAGED = [
+  { event: "SessionStart", matcher: undefined, command: cmdSessionEnv },
   { event: "PreToolUse", matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit", command: cmdApprove },
   { event: "Notification", matcher: undefined, command: cmdNotify("Notification") },
   { event: "PostToolUse", matcher: undefined, command: cmdNotify("PostToolUse") },
@@ -129,7 +134,7 @@ function printPlan(changes) {
 }
 
 function main() {
-  if (!existsSync(APPROVE) || !existsSync(NOTIFY)) {
+  if (!existsSync(APPROVE) || !existsSync(NOTIFY) || !existsSync(SESSION_ENV)) {
     log("install-hooks", `FATAL: hook scripts not found under ${join(REPO_ROOT, "hooks")}.`);
     process.exit(1);
   }
@@ -167,11 +172,11 @@ function main() {
   log("install-hooks", `wrote ${SETTINGS_PATH} (validated).`);
 
   log("install-hooks", "");
-  log("install-hooks", "WARNING: this gates Bash/Edit/Write/MultiEdit/NotebookEdit in ALL Claude Code");
-  log("install-hooks", "         sessions (including ones in THIS folder) — each will require a Telegram");
-  log("install-hooks", "         approval before it runs. The bridge must be up (scripts/run-bridge.mjs),");
-  log("install-hooks", "         or every mutating call default-denies.");
-  log("install-hooks", "         Revert anytime: node scripts/uninstall-hooks-global.mjs --apply");
+  log("install-hooks", "NOTE: installed, but the gate is OFF by default (native prompts) until you run");
+  log("install-hooks", "      `node scripts/gate.mjs on` (batch mode). In batch mode SAFE work runs");
+  log("install-hooks", "      autonomously and only RISKY work needs an approved 결재; the bridge must be");
+  log("install-hooks", "      up (scripts/run-bridge.mjs) or risky work default-denies.");
+  log("install-hooks", "      Revert anytime: node scripts/uninstall-hooks-global.mjs --apply");
 }
 
 main();

@@ -9,14 +9,17 @@ import type { SafeInput } from "./contracts/index.js";
 
 const MAX_SUMMARY_LEN = 200;
 
-// Build a one-line, value-free summary like: "Bash · 1 field (command)" or
-// "Edit · 3 fields (file_path, old_string, new_string)".
+// Build a one-line, value-free summary for the legacy `summary` field (web list / push / event).
+// The hook now sends a STRUCTURED SafeInput, so derive a MEANINGFUL Korean abstract from it
+// (e.g. "셸 명령 'git status' 실행 …"); only fall back to bare field NAMES for a legacy/unknown
+// shape. (Previously this listed the SafeInput WRAPPER's keys -> "Bash · 4 fields (kind, prog, …)".)
 export function buildSummary(tool: string, inputSummary: unknown): string {
+  const safe = coerceSafeInput(inputSummary);
+  if (safe) return clampLine(abstractKo(tool, safe), MAX_SUMMARY_LEN);
+
   const safeTool = sanitizeToken(tool) || "unknown";
   let fieldNames: string[] = [];
   if (inputSummary && typeof inputSummary === "object" && !Array.isArray(inputSummary)) {
-    // Field NAMES only. Tool-input keys are part of the schema (e.g. "command", "file_path"),
-    // not the secret — the secret lives in the values, which we deliberately drop here.
     fieldNames = Object.keys(inputSummary as Record<string, unknown>).map(sanitizeToken);
   }
   const count = fieldNames.length;

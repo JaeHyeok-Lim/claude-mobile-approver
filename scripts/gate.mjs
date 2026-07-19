@@ -6,9 +6,9 @@
 // Usage:
 //   node scripts/gate.mjs status      # show current mode + bridge health
 //   node scripts/gate.mjs off         # NATIVE Claude Code in-session permission prompt (no remote)
-//   node scripts/gate.mjs on          # BATCH 결재 mode: only approved batches pass; else blocked
+//   node scripts/gate.mjs on          # BATCH mode: risk-tiered — SAFE work autonomous, RISKY work
+//                                       needs an approved 결재; gate-control writes denied
 //   node scripts/gate.mjs batch       # (alias of `on`)
-//   node scripts/gate.mjs each        # legacy per-call remote approval card (create + long-poll)
 //
 // This only flips the mode. It does NOT install/uninstall the hook — that's install-hooks-global.mjs.
 // If the hook isn't installed globally, no session is gated regardless of this file.
@@ -18,14 +18,13 @@ import { join } from "node:path";
 import { BRIDGE_DIR, loadBridgeConfig, probeHealth, log } from "./lib/common.mjs";
 
 const MODE_FILE = join(BRIDGE_DIR, ".gate-mode");
-const VALID = new Set(["off", "batch", "each"]);
+const VALID = new Set(["off", "batch"]);
 // User-facing verb -> stored mode. `on` is the intuitive alias for the batch 결재 model.
-const ALIAS = { on: "batch", off: "off", batch: "batch", each: "each" };
+const ALIAS = { on: "batch", off: "off", batch: "batch" };
 
 const DESC = {
   off: "네이티브 세션 승인창 사용 (원격 게이트 꺼짐)",
-  batch: "배치 결재 모드 — 승인된 결재 범위의 작업만 통과, 나머지는 차단",
-  each: "레거시 per-call 원격 승인 카드 (도구 호출마다 카드)"
+  batch: "배치 결재 모드 — 안전 작업은 자율, 위험 작업만 결재 필요(게이트 제어 파일은 차단)"
 };
 
 function readMode() {
@@ -35,7 +34,7 @@ function readMode() {
   } catch {
     /* no file */
   }
-  return "each"; // matches approve.mjs default
+  return "off"; // matches approve.mjs default
 }
 
 async function printStatus() {
@@ -55,7 +54,7 @@ async function main() {
 
   const mode = ALIAS[arg];
   if (!mode) {
-    log("gate", `알 수 없는 인자 "${arg}". 사용: status | off | on | batch | each`);
+    log("gate", `알 수 없는 인자 "${arg}". 사용: status | off | on | batch`);
     process.exit(1);
   }
   writeFileSync(MODE_FILE, mode + "\n", "utf8");
