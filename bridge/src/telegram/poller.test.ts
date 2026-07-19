@@ -520,11 +520,12 @@ function setupBatch() {
 function seedBatch(grants: GrantStore, over: Record<string, unknown> = {}) {
   return grants.create({
     cwd: "C:/proj/Demo",
+    sessionId: "sess-demo",
     title: "demo",
     items: ["a.ts (핵심): 리팩터 — 근거"],
     files: ["C:/proj/Demo/a.ts"],
     dirs: [],
-    bash: false,
+    bashAllow: [],
     maxOps: 3,
     ...over
   });
@@ -598,13 +599,25 @@ test("batch: a long items list is truncated with a 생략 note (never silently d
   assert.ok(text.length <= 4096, "card stays under Telegram's limit");
 });
 
-test("batch: bash:true card spells out the blast radius", async () => {
+test("batch: card renders the actual bashAllow scope with a blast-radius warning", async () => {
   const { grants, channel, calls } = setupBatch();
-  const v = seedBatch(grants, { bash: true, maxOps: 7 });
+  const v = seedBatch(grants, { files: [], bashAllow: ["git push", "npm install"], maxOps: 7 });
   channel.notifyBatch(v);
   await flush();
   const text = calls.sends[0]?.text ?? "";
-  assert.ok(text.includes("임의 명령 실행"), "bash blast radius warned on card");
+  assert.ok(text.includes("git push"), "allowed bash prefixes shown");
+  assert.ok(text.includes("bash ⚠️"), "bash blast-radius marked");
+  assert.ok(text.includes("최대 7회"), "op cap shown");
+});
+
+test("batch: card renders the actual file scope (masked), not just counts", async () => {
+  const { grants, channel, calls } = setupBatch();
+  const v = seedBatch(grants, { files: ["C:/proj/Demo/src/auth.ts"] });
+  channel.notifyBatch(v);
+  await flush();
+  const text = calls.sends[0]?.text ?? "";
+  assert.ok(text.includes("허용 범위"), "scope section present");
+  assert.ok(text.includes("auth.ts"), "actual file shown in scope");
 });
 
 test("batch: card leads with the functional 목적 line and uses the explicit project name", async () => {

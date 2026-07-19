@@ -30,6 +30,7 @@ import type {
 } from "./contracts/index.js";
 import type { ApprovalStore } from "./store/approvalStore.js";
 import type { GrantStore } from "./store/grantStore.js";
+import { normPath } from "./store/grantStore.js";
 import type { EventStore } from "./store/eventStore.js";
 import type { DeviceStore } from "./store/deviceStore.js";
 import type { ExpoPush } from "./push/expoPush.js";
@@ -199,15 +200,27 @@ export function buildRouter(deps: Deps): Router {
     if (!body || typeof body.cwd !== "string" || typeof body.title !== "string") {
       return badRequest(res, "cwd and title are required");
     }
+    // Coverage is session-bound, so a batch without a session could never be matched -> reject.
+    if (typeof body.sessionId !== "string" || !body.sessionId.trim()) {
+      return badRequest(res, "sessionId is required (coverage is session-bound)");
+    }
     const items = stringArray(body.items, 40, 300);
     if (items.length === 0) {
       return badRequest(res, "items must be a non-empty array of summary lines");
     }
     const files = stringArray(body.files, 100, 400);
     const dirs = stringArray(body.dirs, 40, 400);
-    const bash = body.bash === true;
-    if (files.length === 0 && dirs.length === 0 && !bash) {
-      return badRequest(res, "batch must cover at least one of: files, dirs, bash");
+    const bashAllow = stringArray(body.bashAllow, 30, 120);
+    if (files.length === 0 && dirs.length === 0 && bashAllow.length === 0) {
+      return badRequest(res, "batch must cover at least one of: files, dirs, bashAllow");
+    }
+    // Refuse over-broad dir scopes: a drive root ("c:") or filesystem root would cover everything.
+    const rootDir = dirs.find((d) => {
+      const n = normPath(d);
+      return n === "" || n === "/" || /^[a-z]:$/.test(n);
+    });
+    if (rootDir) {
+      return badRequest(res, `dir scope too broad (drive/filesystem root): ${rootDir}`);
     }
     // Clamp the op budget to [1, hard cap]; default when unspecified.
     const requested =
@@ -229,7 +242,7 @@ export function buildRouter(deps: Deps): Router {
       items,
       files,
       dirs,
-      bash,
+      bashAllow,
       maxOps
     });
 
@@ -308,7 +321,9 @@ export function buildRouter(deps: Deps): Router {
       cwd: body.cwd,
       sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
       tool: body.tool,
-      path: typeof body.path === "string" ? body.path : undefined
+      path: typeof body.path === "string" ? body.path : undefined,
+      prog: typeof body.prog === "string" ? body.prog : undefined,
+      sub: typeof body.sub === "string" ? body.sub : undefined
     });
     const resp: CoverageResponse = result;
     res.json(resp);

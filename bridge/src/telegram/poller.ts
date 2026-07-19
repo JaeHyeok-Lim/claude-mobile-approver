@@ -66,7 +66,9 @@ const BATCH_CALLBACK_RE = /^(b[ad]):([0-9a-fA-F-]{36})$/;
 
 // Telegram rejects messages over ~4096 chars. Keep the rich batch card comfortably under that; if
 // the items list would overflow we truncate it and note how many were hidden (never silently drop).
-const CARD_CHAR_BUDGET = 3500;
+// Combined budget for the items block + scope block. Header/목적/expiry add ~600, so this stays
+// comfortably under Telegram's ~4096-char message limit.
+const CARD_CHAR_BUDGET = 3200;
 
 // Cap the requestId -> tracked-card map so a flood of approvals can't grow it unbounded.
 const MESSAGE_MAP_CAP = 200;
@@ -106,7 +108,7 @@ interface BatchCardContext {
   projectName: string;
   shortSession: string; // "" when the batch carried no session
   itemsBlock: string; // pre-rendered, budget-clamped, escaped items list
-  scopeLine: string; // "범위 : 파일 N · 디렉터리 M · bash 허용/불가"
+  scopeBlock: string; // pre-rendered, escaped: the ACTUAL enforced scope (masked files/dirs + bash)
   threadId?: number;
   edited?: boolean;
 }
@@ -120,14 +122,15 @@ function projectNameOf(cwd: string): string {
 // ---- 결재 card rendering (pure; module scope so they aren't rebuilt per channel/call) ----
 
 // Build the numbered items block within a char budget. Never silently drops — if it can't fit
-// everything it appends a "…(생략 K건)" note so the reader knows more work is covered.
-function buildItemsBlock(items: string[]): string {
+// everything it appends a "…(생략 K건)" note so the reader knows more work is covered. The budget is
+// passed in (the caller subtracts the scope block) so the WHOLE card stays under Telegram's limit.
+function buildItemsBlock(items: string[], budget: number): string {
   const lines: string[] = [];
   let used = 0;
   let shown = 0;
   for (let i = 0; i < items.length; i++) {
     const line = `    ${i + 1}. ${escapeHtml(items[i]!)}`;
-    if (used + line.length > CARD_CHAR_BUDGET && shown > 0) break;
+    if (used + line.length > budget && shown > 0) break;
     lines.push(line);
     used += line.length + 1;
     shown += 1;
@@ -136,11 +139,25 @@ function buildItemsBlock(items: string[]): string {
   return lines.join("\n");
 }
 
-function batchScopeLine(view: BatchView): string {
-  // bash:true is the widest grant — it authorizes ANY command for the window, so the card spells
-  // out the blast radius (⚠️ is the sanctioned risk-warning emoji).
-  const bash = view.bash ? `허용 ⚠️ (승인 시 최대 ${view.maxOps}회 임의 명령 실행)` : "불가";
-  return `범위 : 파일 ${view.files.length} · 디렉터리 ${view.dirs.length} · bash ${bash}`;
+// Render the ACTUAL machine-enforced scope (masked files/dirs + allowed bash prefixes) — NOT just
+// counts. The approver must consent to what the grant really authorizes, not only the prose.
+function buildScopeBlock(view: BatchView): string {
+  const entries: string[] = [
+    ...view.files.map((f) => escapeHtml(maskPath(f))),
+    ...view.dirs.map((d) => `${escapeHtml(maskPath(d))}/**`)
+  ];
+  const CAP = 15;
+  const shown = entries.slice(0, CAP).map((e) => `    · ${e}`);
+  if (entries.length > CAP) shown.push(`    · …외 ${entries.length - CAP}개`);
+  if (view.bashAllow.length > 0) {
+    // Allowed bash prefixes carry real blast radius -> ⚠️, and spell out the op cap. Clamp the
+    // joined list so one huge bashAllow can't blow past Telegram's message limit.
+    const joined = view.bashAllow.join(", ");
+    const clamped = joined.length > 240 ? joined.slice(0, 239) + "…" : joined;
+    shown.push(`    · bash ⚠️ : ${escapeHtml(clamped)} (최대 ${view.maxOps}회)`);
+  }
+  if (shown.length === 0) shown.push("    · (범위 없음)");
+  return shown.join("\n");
 }
 
 // Render a 결재 card. Header + body (title/session/items/scope) stay identical across states;
@@ -156,7 +173,7 @@ function renderBatchCard(ctx: BatchCardContext, statusTag: string, lastLine: str
     `• 프로젝트 : <b>${escapeHtml(ctx.projectName)}</b>`
   ];
   if (ctx.shortSession) lines.push(`• 세션     : <code>#${escapeHtml(ctx.shortSession)}</code>`);
-  lines.push("• 작업     :", ctx.itemsBlock, `• ${escapeHtml(ctx.scopeLine)}`, "", lastLine);
+  lines.push("• 작업     :", ctx.itemsBlock, "• 허용 범위 :", ctx.scopeBlock, "", lastLine);
   return lines.join("\n");
 }
 
@@ -333,13 +350,16 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     // when a session runs from a home/parent dir).
     const projectName = view.project || (view.cwd ? projectNameOf(view.cwd) : "(작업폴더 없음)");
     const shortSession = view.sessionId ? view.sessionId.slice(0, 8) : "";
+    const scopeBlock = buildScopeBlock(view);
     const ctxBase: BatchCardContext = {
       messageId: 0,
       title: view.title,
       projectName,
       shortSession,
-      itemsBlock: buildItemsBlock(view.items),
-      scopeLine: batchScopeLine(view)
+      scopeBlock,
+      // Budget items against the WHOLE card: subtract the scope block so items + scope + header
+      // stay under Telegram's ~4096 limit (CARD_CHAR_BUDGET is the items+scope target; header ~600).
+      itemsBlock: buildItemsBlock(view.items, Math.max(400, CARD_CHAR_BUDGET - scopeBlock.length))
     };
     const text = renderBatchCard(ctxBase, "대기", batchExpiryLine(view.expiresAt));
     const keyboard = [
@@ -469,12 +489,15 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
     const result = grants.resolve(batchId, decision);
     if (result.ok) {
       const tag = decision === "allow" ? "승인됨" : "거부됨";
-      events.append({
+      // Broadcast BOTH frames (event + batch) — same as the HTTP resolve route, so SSE clients
+      // don't drift depending on which channel resolved the 결재.
+      const ev = events.append({
         kind: "Decision",
         message: `결재 ${tag}: ${result.view.title}`,
         severity: decision === "allow" ? "info" : "warn",
         source: result.view.sessionId ?? result.view.cwd
       });
+      live.broadcast({ type: "event", event: ev });
       live.broadcast({ type: "batch", batch: result.view });
       await editBatchTerminal(batchId, tag, `<b>${tag}</b>`);
       await api.answerCallbackQuery(cqId, tag);
@@ -529,7 +552,10 @@ export function createTelegramChannel(deps: TelegramDeps): TelegramChannel {
         batchMessages.delete(batchId);
         continue;
       }
-      const term = TERMINAL[view.status];
+      // A grant that was APPROVED and later had its execution window close reads status "expired",
+      // but it was NOT auto-denied — label it 승인됨(완료), not 만료. resolvedAt distinguishes them.
+      const key = view.status === "expired" && view.resolvedAt ? "allow" : view.status;
+      const term = TERMINAL[key];
       if (!term) continue; // "pending" — still awaiting a decision
       await editBatchTerminal(batchId, term[0], term[1]);
       batchMessages.delete(batchId);

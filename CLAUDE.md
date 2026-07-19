@@ -46,13 +46,13 @@ node scripts/health.mjs
 # auto-start at logon (Windows Scheduled Task, loopback-only, no gating)
 pwsh scripts/install-autostart.ps1
 
-# global hook installer (gates Bash|Edit|Write|MultiEdit|NotebookEdit in ALL sessions)
+# global hook installer (SessionStart + PreToolUse gate + reporting, ALL sessions; gate OFF until `gate on`)
 node scripts/install-hooks-global.mjs           # dry-run first — always
 node scripts/install-hooks-global.mjs --apply   # write after reviewing
 
-# gate mode toggle (off = native prompt · on = batch 결재 · each = legacy per-call)
+# gate mode toggle — off = native in-session prompt (default) · on = risk-tiered batch 결재
 node scripts/gate.mjs status
-node scripts/gate.mjs off | on | each
+node scripts/gate.mjs off | on
 
 # submit a batch 결재 (agent workflow in batch mode) — see docs/batch-approval.md
 node scripts/submit-batch.mjs --spec <spec.json>

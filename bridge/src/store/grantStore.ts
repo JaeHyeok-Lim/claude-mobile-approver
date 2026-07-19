@@ -45,7 +45,8 @@ export function normPath(p: string): string {
 }
 
 // Tools whose target is a file path (coverage is by path/dir scope). Bash is handled separately.
-const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Read"]);
+// Matches the PreToolUse gate matcher (Read is NOT gated, so it's not coverage-eligible).
+const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
 interface StoredGrant {
   batchId: string;
@@ -56,7 +57,7 @@ interface StoredGrant {
   items: string[];
   files: string[]; // normalized absolute paths
   dirs: string[]; // normalized directory prefixes
-  bash: boolean;
+  bashAllow: string[]; // lowercased allowed command prefixes (e.g. "git push")
   maxOps: number;
   remainingOps: number;
   createdAt: number;
@@ -74,7 +75,7 @@ export interface CreateGrantInput {
   items: string[];
   files: string[];
   dirs: string[];
-  bash: boolean;
+  bashAllow: string[];
   maxOps: number;
 }
 
@@ -83,6 +84,8 @@ export interface CoverageQuery {
   sessionId?: string;
   tool: string;
   path?: string;
+  prog?: string; // Bash program token (redaction-safe), for bashAllow prefix matching
+  sub?: string | null; // Bash plain subcommand
 }
 
 export type CoverageResult = {
@@ -115,7 +118,7 @@ export class GrantStore {
       items: input.items,
       files: input.files.map(normPath).filter((f) => f.length > 0),
       dirs: input.dirs.map(normPath).filter((d) => d.length > 0),
-      bash: input.bash,
+      bashAllow: input.bashAllow.map((p) => p.trim().toLowerCase()).filter((p) => p.length > 0),
       maxOps: input.maxOps,
       remainingOps: input.maxOps,
       createdAt: now,
@@ -194,18 +197,18 @@ export class GrantStore {
       if (rec.grantExpiresAt === undefined || now >= rec.grantExpiresAt) continue;
       if (rec.remainingOps <= 0) continue;
 
-      // Binding: same project cwd always required. If BOTH sides name a session, they must match;
-      // a grant with no session binds by cwd alone (broader, but never crosses projects).
+      // Binding: session is REQUIRED — a grant authorizes only its own session's work. Both sides
+      // must name the same session; cwd is a secondary project guard. Fail closed if either is unset.
+      if (rec.sessionId === "" || !q.sessionId || rec.sessionId !== q.sessionId) continue;
       if (rec.cwd !== qCwd) continue;
-      if (rec.sessionId !== "" && q.sessionId !== undefined && rec.sessionId !== q.sessionId) {
-        continue;
-      }
 
-      // Scope: Bash -> the batch must allow bash. File tool -> path must be an exact listed file
-      // or sit under a listed dir prefix.
+      // Scope: File tool -> path is an exact listed file or under a listed dir prefix.
+      // Bash -> "prog sub" must start with one of the grant's allowed command prefixes.
       let inScope = false;
       if (isBash) {
-        inScope = rec.bash === true;
+        const cmd = `${q.prog ?? ""} ${q.sub ?? ""}`.trim().toLowerCase();
+        // Boundary-safe prefix: "git" matches "git" and "git push", never "gitfoo".
+        inScope = cmd.length > 0 && rec.bashAllow.some((p) => cmd === p || cmd.startsWith(p + " "));
       } else if (qPath) {
         inScope =
           rec.files.includes(qPath) ||
@@ -262,7 +265,7 @@ export class GrantStore {
       items: rec.items,
       files: rec.files,
       dirs: rec.dirs,
-      bash: rec.bash,
+      bashAllow: rec.bashAllow,
       maxOps: rec.maxOps,
       remainingOps: rec.remainingOps,
       createdAt: new Date(rec.createdAt).toISOString(),

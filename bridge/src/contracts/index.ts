@@ -165,8 +165,8 @@ export interface CreateBatchRequest {
   // cwd basename — a session run from a home dir would show the wrong name). Optional; falls back
   // to the cwd's last segment.
   project?: string;
-  // Optional session label — used for display + topic routing, and (when both sides set it)
-  // tightens coverage to that session. Omit and coverage falls back to cwd-only binding.
+  // Session this batch is bound to. Coverage REQUIRES a matching sessionId (a grant authorizes only
+  // its own session's work), so submit-batch fills it from CLAUDE_SESSION_ID. cwd is a secondary guard.
   sessionId?: string;
   // REQUIRED functional one-liner shown at the very TOP of the card as "■ 목적": what this work does
   // functionally, in the user's terms (e.g. "로그인 실패 429 처리로 브루트포스 방어"). Not a file list.
@@ -176,7 +176,9 @@ export interface CreateBatchRequest {
   items: string[];
   files?: string[]; // absolute file paths covered (Edit/Write/MultiEdit/NotebookEdit)
   dirs?: string[]; // directory prefixes covered (a call under one of these is covered)
-  bash?: boolean; // whether Bash tool calls are covered by this batch
+  // Allowed Bash command prefixes covered by this batch (e.g. ["git push","npm publish"]). A risky
+  // Bash call is covered only if its "prog sub" starts with one of these. Empty/absent = no bash.
+  bashAllow?: string[];
   maxOps?: number; // max mutating ops this grant authorizes (server clamps to a hard cap)
 }
 
@@ -196,7 +198,7 @@ export interface BatchView {
   items: string[];
   files: string[];
   dirs: string[];
-  bash: boolean;
+  bashAllow: string[];
   maxOps: number;
   remainingOps: number;
   createdAt: string; // ISO-8601 UTC
@@ -219,6 +221,9 @@ export interface CoverageRequest {
   sessionId?: string;
   tool: string;
   path?: string; // file_path / notebook_path for file tools; omitted for Bash
+  // Redaction-safe partial for Bash prefix matching against a grant's bashAllow. No raw args.
+  prog?: string; // program token (e.g. "git")
+  sub?: string | null; // plain subcommand (e.g. "push"), or null
 }
 export interface CoverageResponse {
   covered: boolean;

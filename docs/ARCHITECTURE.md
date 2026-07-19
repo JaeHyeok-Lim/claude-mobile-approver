@@ -5,6 +5,21 @@
 Operate Claude Code from a phone: **see what the session is doing** and **approve or deny
 permission prompts remotely**, with the approval actually gating the real action on the computer.
 
+## Gate model (current)
+
+The `PreToolUse` gate has two modes, toggled by `bridge/.gate-mode` (`scripts/gate.mjs`):
+
+- **`off` (default)** — the hook emits `ask`, so Claude Code shows its **native in-session prompt**.
+  No remote gating.
+- **`batch`** — **risk-tiered**: the hook auto-allows **safe** work (autonomy), requires an
+  agent-authored, session-bound **batch 결재** (coverage grant) for **risky** work, and denies any
+  write to the gate's own control plane. Full spec + risk policy: **[batch-approval.md](batch-approval.md)**.
+
+Risky work is authorized by `POST /v1/coverage` against an active grant (created via
+`POST /v1/batches`, approved on Telegram). The `/v1/approvals` per-call API described below is the
+earlier per-call design; it is retained for `scripts/send-test-approval.mjs` and the web page, and
+is the shape the Telegram approval card + redaction use.
+
 ## Components
 
 ### 1. hooks/ — Claude Code integration
@@ -12,15 +27,16 @@ permission prompts remotely**, with the approval actually gating the real action
 Plain `.mjs`, zero-dependency. Installed into a target project's `.claude/settings.json` or
 globally into `~/.claude/settings.json` (see [scripts/README.md](../scripts/README.md)).
 
-- **`approve.mjs` (PreToolUse)** — the approval gate. For every tool call that matches the
-  configured matcher (`Bash|Edit|Write|MultiEdit|NotebookEdit`):
-  1. POST a **redacted summary** of the tool call to the bridge (`/v1/approvals`) → get a
-     `requestId`.
-  2. Bounded long-poll (`/v1/approvals/:id`) for the decision (budget: `APPROVE_TOTAL_MS`,
-     default 10 min, matching the bridge TTL).
-  3. Emit `{"permissionDecision":"allow"}` on explicit allow; deny on everything else.
-  4. On timeout, network error, parse failure, or any ambiguous status → **default-deny**.
-  The hook never hangs the session forever and never auto-approves on failure.
+- **`approve.mjs` (PreToolUse)** — the risk-tiered gate (matcher `Bash|Edit|Write|MultiEdit|
+  NotebookEdit`). In `off` mode it emits `ask` (native prompt). In `batch` mode, per call:
+  kill-switch write → **deny**; the canonical `submit-batch` command → **allow** (bootstrap);
+  **safe** work (in-project non-sensitive edits; read-only/local-vcs bash with no shell
+  metacharacters) → **allow** autonomously; otherwise → a single `POST /v1/coverage` against an
+  active session-bound grant → allow (consume an op) or **deny**. Never long-polls; never
+  auto-approves on error (default-deny). See [batch-approval.md](batch-approval.md).
+
+- **`session-env.mjs` (SessionStart)** — injects `CLAUDE_SESSION_ID` (via `$CLAUDE_ENV_FILE`) so
+  `submit-batch` binds a 결재 to the same session the gate reports on `/v1/coverage`.
 
 - **`notify.mjs` (SubagentStop / Notification / PostToolUse)** — fire-and-forget event reporter.
   POST a safe event summary to `/v1/events`. Always exits 0. Never blocks or gates.
@@ -33,7 +49,7 @@ globally into `~/.claude/settings.json` (see [scripts/README.md](../scripts/READ
 Binds `127.0.0.1:4318` only (loopback). Never exposed directly to the internet.
 
 - **Approval store** (`bridge/src/store/approvalStore.ts`): `requestId → {status:
-  pending|allow|deny|expired, ...}`. TTL = 10 min. Expired entries → auto-deny. The store is
+  pending|allow|deny|expired, ...}`. TTL = 30 min. Expired entries → auto-deny. The store is
   the authoritative source of truth; every channel (HTTP, Telegram) resolves through it.
 - **Routes** (`bridge/src/routes.ts`): REST endpoints on `/v1`. Auth on every request (shared
   bearer token, constant-time compare). Rate-limited.
@@ -108,7 +124,7 @@ approve.mjs (PreToolUse hook)
   │  POST /v1/approvals  { sessionId, tool, inputSummary (SafeInput), cwd }
   ▼
 bridge (loopback :4318)
-  │  stores pending approval (requestId, TTL=10 min)
+  │  stores pending approval (requestId, TTL=30 min)
   │  notifyApproval(view) →
   ▼
 Telegram bot API (outbound long-poll)
@@ -128,7 +144,7 @@ approve.mjs long-poll (GET /v1/approvals/:id)
 Claude Code runs or blocks the tool
 ```
 
-**Timeout path**: if no decision arrives within 10 min, the store marks the entry `expired`,
+**Timeout path**: if no decision arrives within 30 min, the store marks the entry `expired`,
 the Telegram card is edited to **[만료]** by the reconcile sweep, and the hook default-denies.
 
 ## Security model
@@ -153,7 +169,7 @@ the Telegram card is edited to **[만료]** by the reconcile sweep, and the hook
 | Bridge not started / unreachable | Hook default-denies |
 | `BRIDGE_TOKEN` not set in hook env | Hook default-denies |
 | Bridge boots without `BRIDGE_TOKEN` | Bridge refuses to start |
-| Approval TTL (10 min) expires | Store marks `expired` → hook receives deny |
+| Approval TTL (30 min) expires | Store marks `expired` → hook receives deny |
 | Hook poll budget (`APPROVE_TOTAL_MS`) exhausted | Hook default-denies |
 | Telegram delivery fails (network/timeout) | Approval stays pending → TTL → deny |
 | `callback_data` fails strict regex | Tap is dropped; nothing resolved |
